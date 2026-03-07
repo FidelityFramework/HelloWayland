@@ -8,7 +8,7 @@ HelloWayland is a "hello world" for native Linux desktop applications compiled b
 
 ## The 19-Line Program
 
-```clef
+```fsharp
 module HelloWayland
 
 open Console
@@ -21,7 +21,7 @@ open Fidelity.Desktop.App
 let main _ =
   Console.writeln "HelloWayland: Fidelity.UI Splash"
 
-  let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 320 240
+  let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 320 320
   let title = label "Clef, Native by Design"
         |> withColor (white ())
         |> withFontSize 18
