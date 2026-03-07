@@ -1,0 +1,35 @@
+[package]
+name = "HelloWayland"
+version = "0.2.0"
+description = "Clef + Fidelity — Native Wayland Splash Screen (Fidelity.UI)"
+authors = ["SpeakEZ Technologies, Inc."]
+license = "MIT"
+
+[compilation]
+target = "cpu"
+
+[platform]
+runtime_model = "libc"
+os = "linux"
+arch = "x86_64"
+word_size = 64
+
+[dependencies]
+# Platform binding — required for platform context (must be named "platform")
+platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
+
+# Desktop lifecycle — transitively pulls in Platform.Display, Wayland, DRM, GBM, Libc, resvg
+desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
+
+# UI framework (widget descriptors, modifiers, rendering bridge)
+ui = { path = "../Fidelity.UI/Fidelity.UI.fidproj" }
+
+[build]
+sources = [
+    "src/Main.clef"
+]
+output = "HelloWayland"
+output_kind = "console"
+
+[link]
+libraries = ["wayland-client", "drm", "gbm", "resvg"]

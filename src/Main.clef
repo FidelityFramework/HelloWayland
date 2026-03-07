@@ -1,0 +1,19 @@
+/// HelloWayland — Clef + Fidelity Native Wayland Splash Screen
+module HelloWayland
+
+open Console
+open Fidelity.UI.Types
+open Fidelity.UI.Widgets
+open Fidelity.UI.Modifiers
+open Fidelity.Desktop.App
+
+[<EntryPoint>]
+let main _ =
+    Console.writeln "HelloWayland: Fidelity.UI Splash"
+
+    let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 320 240
+    let title = label "Clef — Native by Design"
+                |> withColor (white ())
+                |> withFontSize 18
+
+    App.run "HelloWayland" logo title
