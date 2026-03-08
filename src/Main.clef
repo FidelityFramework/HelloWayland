@@ -10,8 +10,8 @@ open Fidelity.Desktop.App
 [<EntryPoint>]
 let main _ =
     Console.writeln "HelloWayland: Fidelity.UI Splash"
-
-    let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 320 240
+    // image is square
+    let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 512 512
     let title = label "Clef — Native by Design"
                 |> withColor (white ())
                 |> withFontSize 18
