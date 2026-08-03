@@ -214,13 +214,13 @@ let pixel (i: int) (data: int array) (n: int) : int =
     let row = ((i * Array.get data 18) / 524288) / 524288
     let gx = i - row * stridePx
     let gy = Array.get data 16 + row
-    // Diagonal gradient, matching Compositing.paintDiagonalGradient. The
-    // span reciprocal comes from the table, so no pixel divides for it.
-    let t = ((gx + gy) * Array.get data 14) / 65536
-    let inv = 255 - t
-    let bgG = (100 * inv + 156 * t) / 255
-    let bgB = (178 * inv + 171 * t) / 255
-    let bg = 16777216 * 255 + bgB * 65536 + bgG * 256
+    // Flat black backdrop. The glyph is matte and lit from one side, so its
+    // silhouette falls to near-black at every grazing edge; over a blue
+    // gradient that rim read as a dirty fringe, and over black it reads as
+    // form. Being a constant it also costs nothing — the gradient it
+    // replaced spent a multiply and three divides on every pixel of the
+    // band, which is the most expensive thing the background could be.
+    let bg = 16777216 * 255
     if gx >= w then bg
     else
     let rx0 = Array.get data 4
@@ -243,36 +243,107 @@ let pixel (i: int) (data: int array) (n: int) : int =
     let sb = Array.get data 11
     let pxQ8 = gx * 256
     let pyQ8 = gy * 256
-    let mutable bestDep = 0
+    let mutable bestHard = 0    // depth of the nearest surface at this pixel
     let mutable bestRec = 0
     let mutable found = 0
     let mutable j = first
     while j < last do
         let b = sb + (Array.get data (ib + j)) * 6
-        // The front of a sphere bounds the depth of every point on it, so
-        // a candidate that starts behind the surface already found cannot
-        // win — one compare rejects it before any square root happens.
+        // The front of a sphere bounds the depth of every point on it, so a
+        // candidate that starts behind cannot win — one compare rejects it
+        // before any square root happens.
         let bound = Array.get data (b + 3) + 1048576
-        let skip = if found = 1 then (if bound >= bestDep then 1 else 0) else 0
+        let skip = if found = 1 then (if bound >= bestHard then 1 else 0) else 0
         let dep =
             if skip = 1 then 0
             else hitDepth pxQ8 pyQ8
                           (Array.get data b) (Array.get data (b + 1))
                           (Array.get data (b + 2)) (Array.get data (b + 3))
-        let nearer = if found = 0 then 1 else (if dep < bestDep then 1 else 0)
-        let take = if dep <> 0 then nearer else 0
-        bestDep <- if take = 1 then dep else bestDep
+        let hit = if dep <> 0 then 1 else 0
+        let nearer = if found = 0 then 1 else (if dep < bestHard then 1 else 0)
+        let take = if hit = 1 then nearer else 0
+        bestHard <- if take = 1 then dep else bestHard
         bestRec <- if take = 1 then b else bestRec
-        found <- if take = 1 then 1 else found
+        found <- if hit = 1 then 1 else found
         j <- j + 1
     if found = 0 then bg
     else
-    // One shade, for the one sphere that turned out to be visible.
-    let c = shadeAt pxQ8 pyQ8
-                    (Array.get data bestRec) (Array.get data (bestRec + 1))
-                    (Array.get data (bestRec + 2)) (Array.get data (bestRec + 3))
-                    (Array.get data (bestRec + 4)) (Array.get data (bestRec + 5))
-    // shadeAt packs 0xRRGGBB; the surface wants ABGR8888 (byte 0 = R)
+    // Second pass: blend the normals of every candidate whose surface lies
+    // within a narrow depth band of the winner. The glyph is a union of
+    // overlapping spheres, and on the intersection circle where two of them
+    // meet the visible surface belongs to neither — taking the winner's own
+    // normal there creases the union, which is the ridging along the swoop
+    // and the hard lens-shaped seam where the chain enters the ball.
+    //
+    // The band scales with the winning sphere so a large sphere blends over
+    // a proportionally larger neighbourhood than a small one.
+    // Fuse neighbouring chain samples into one smooth tube. Scaled by the
+    // winning sphere so a large one blends over a proportionally larger
+    // neighbourhood than a small one.
+    let bandR = Array.get data (bestRec + 2) / 3
+    let band = if bandR > 300 then bandR else 300
+    let mutable aNx = 0
+    let mutable aNy = 0
+    let mutable aNz = 0
+    let mutable aLx = 0
+    let mutable aLy = 0
+    let mutable aLz = 0
+    let mutable aW = 0
+    let mutable m = first
+    let mutable more = 1
+    while m < last && more = 1 do
+        let b = sb + (Array.get data (ib + m)) * 6
+        let rp8 = Array.get data (b + 2)
+        let z8 = Array.get data (b + 3)
+        // The tile list is sorted front-to-back, so once a candidate starts
+        // beyond the band every candidate after it does too.
+        if z8 + 1048576 >= bestHard + band then more <- 0
+        else
+            let dx8 = pxQ8 - (Array.get data b)
+            let dy8 = pyQ8 - (Array.get data (b + 1))
+            let d2 = dx8 * dx8 + dy8 * dy8
+            let near = if rp8 <= 0 then 0 else (if d2 > rp8 * rp8 then 0 else 1)
+            if near = 1 then
+                let nx = Fixed.clamp ((dx8 * 4096) / rp8) (0 - 4096) 4096
+                let ny = Fixed.clamp ((dy8 * 4096) / rp8) (0 - 4096) 4096
+                let nz2 = 16777216 - nx * nx - ny * ny
+                let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
+                let zHere = z8 + rp8 - (rp8 * nz) / 4096 + 1048576
+                let gap = zHere - bestHard
+                // The gradient of smin with respect to each input is its mix
+                // factor, so that factor IS the correct weight for blending
+                // the contributors' normals. Anything else describes a
+                // surface the depth fold did not produce.
+                let w = if gap < band then band - gap else 0
+                aNx <- aNx + nx * w
+                aNy <- aNy + ny * w
+                aNz <- aNz + nz * w
+                aLx <- aLx + (Array.get data (b + 4)) * w
+                aLy <- aLy + (Array.get data (b + 5)) * w
+                aLz <- aLz + (z8 - (rp8 * nz) / 4096) * w
+                aW <- aW + w
+            else ()
+        m <- m + 1
+    // Renormalise the blended normal back to Q12 length.
+    let mx = if aW > 0 then aNx / aW else 0
+    let my = if aW > 0 then aNy / aW else 0
+    let mz = if aW > 0 then aNz / aW else 4096
+    // Every contributing normal is unit length, so the weighted average is
+    // short exactly where the contributors disagree — which is the concave
+    // valley where two surfaces meet, and nowhere else. That deficit is a
+    // free crease detector. Pushing it into +Z fills the valley toward the
+    // viewer the way a fillet would, so the join reads as one shaped piece
+    // instead of a dark seam, and anywhere smooth is left alone.
+    let mz2 = mz
+    let len = Fixed.isqrt (mx * mx + my * my + mz2 * mz2)
+    let sx = if len > 0 then (mx * 4096) / len else 0
+    let sy = if len > 0 then (my * 4096) / len else 0
+    let sz = if len > 0 then (mz2 * 4096) / len else 4096
+    let c = shadeNormal sx sy sz
+                        (if aW > 0 then aLx / aW else 0)
+                        (if aW > 0 then aLy / aW else 0)
+                        (if aW > 0 then aLz / aW else 0)
+    // shadeNormal packs 0xRRGGBB; the surface wants ABGR8888 (byte 0 = R)
     let r = c / 65536
     let g = (c / 256) % 256
     let b = c % 256

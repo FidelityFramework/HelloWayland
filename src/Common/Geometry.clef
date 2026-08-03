@@ -90,20 +90,17 @@ let hitDepth (pxQ8: int) (pyQ8: int)
     let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
     z8 + rp8 - (rp8 * nz) / 4096 + 1048576
 
-/// Colour of a projected sphere at pixel (pxQ8, pyQ8), packed 0xRRGGBB.
-/// (lx8, ly8) is the sphere's centre in LOGO space — the light law is an
-/// inverse square about the glyph, and screen coordinates are already
-/// scaled and offset, so feeding those in collapses the intensity.
-let shadeAt (pxQ8: int) (pyQ8: int)
-            (cx8: int) (cy8: int) (rp8: int) (z8: int)
-            (lx8: int) (ly8: int) : int =
-    let dx8 = pxQ8 - cx8
-    let dy8 = pyQ8 - cy8
-    // surface normal, Q12, from the sphere equation
-    let nx = if rp8 > 0 then Fixed.clamp ((dx8 * 4096) / rp8) (0 - 4096) 4096 else 0
-    let ny = if rp8 > 0 then Fixed.clamp ((dy8 * 4096) / rp8) (0 - 4096) 4096 else 0
-    let nz2 = 16777216 - nx * nx - ny * ny
-    let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
+/// Colour for a surface whose normal is (nx, ny, nz) in Q12, lit at the
+/// logo-space position (lx8, ly8, pz8). Packed 0xRRGGBB.
+///
+/// The normal is a parameter rather than being derived from one sphere,
+/// because the glyph is a union of overlapping spheres and the visible
+/// surface where two of them meet belongs to neither. Taking the nearest
+/// sphere's own normal there puts a crease along every intersection
+/// circle — visible as ridging along the swoop and as a hard lens-shaped
+/// seam where the chain enters the ball.
+let shadeNormal (nx: int) (ny: int) (nz: int)
+                (lx8: int) (ly8: int) (pz8: int) : int =
     let ndl = Fixed.clamp ((nx * (0 - 1562) + ny * (0 - 1726) + nz * 3370) / 4096) 0 4096
     let ndh = Fixed.clamp ((nx * (0 - 818) + ny * (0 - 904) + nz * 3910) / 4096) 0 4096
     let p2 = (ndh * ndh) / 4096
@@ -111,10 +108,14 @@ let shadeAt (pxQ8: int) (pyQ8: int)
     let p8v = (p4 * p4) / 4096
     let p16 = (p8v * p8v) / 4096
     let p32 = (p16 * p16) / 4096
-    let spec = (p32 * p8v) / 4096
+    let p64 = (p32 * p32) / 4096
+    // A tighter lobe. At ^40 the highlight saturated all three channels
+    // across a wide patch, which reads as a washed-out translucency rather
+    // than a polished surface.
+    let spec = (p64 * p8v) / 4096
     let lit = 737 + (3359 * ndl) / 4096
-    let glint = (255 * ((3891 * spec) / 4096)) / 4096
-    let inten = lightAt lx8 ly8 (z8 - (rp8 * nz) / 4096)
+    let glint = (216 * ((3400 * spec) / 4096)) / 4096
+    let inten = lightAt lx8 ly8 pz8
     let cr = Fixed.clamp ((((68 * lit) / 4096 + glint) * inten) / 4096) 0 255
     let cg = Fixed.clamp ((((38 * lit) / 4096 + glint) * inten) / 4096) 0 255
     let cb = Fixed.clamp ((((26 * lit) / 4096 + glint) * inten) / 4096) 0 255

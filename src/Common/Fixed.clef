@@ -19,6 +19,21 @@ let lerp8 (a: int) (b: int) (t8: int) : int =
     a + ((b - a) * t8) / 256
 
 /// Integer square root (floor) via Newton iteration. n >= 0.
+/// Polynomial smooth minimum over a window k.
+///
+/// Where a and b are further apart than k this is exactly min. Where they
+/// are close it dips *below* both, most at a = b, by k/4. That dip is the
+/// whole point: folding surface depths with this instead of min turns the
+/// crease where two surfaces meet into a fillet, because material is added
+/// in the valley and the term decays to nothing outside the window — so a
+/// join can be rounded without the surfaces bulging anywhere else.
+let smin (a: int) (b: int) (k: int) : int =
+    if k <= 0 then (if a < b then a else b)
+    else
+        let h = clamp (2048 + (2048 * (b - a)) / k) 0 4096
+        let m = b + ((a - b) * h) / 4096
+        m - (k * h * (4096 - h)) / 16777216
+
 /// Square root, seeded then refined a fixed four times. This is called
 /// once per candidate sphere per pixel, so the iteration count is the
 /// tracer's inner cost: an open Newton loop from x = n takes a division

@@ -21,8 +21,6 @@ platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fid
 # Desktop lifecycle — transitively pulls in Platform.Display, Wayland, DRM, GBM, Libc, resvg
 desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
 
-# UI framework (widget descriptors, modifiers, rendering bridge)
-ui = { path = "../Fidelity.UI/Fidelity.UI.fidproj" }
 
 [build]
 sources = [
