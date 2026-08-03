@@ -1,19 +1,14 @@
 /// HelloWayland — Clef + Fidelity Native Wayland Splash Screen
+///
+/// Animated-logo edition: the clef glyph is modeled as 3D geometry
+/// (swept-sphere chain + dot spheres, single-light shading) and pivots
+/// +-20 deg about its vertical axis, re-rendered every compositor frame
+/// via wl_surface::frame callbacks. See docs/animated_logo_3d.md.
 module HelloWayland
 
 open Console
-open Fidelity.UI.Types
-open Fidelity.UI.Widgets
-open Fidelity.UI.Modifiers
-open Fidelity.Desktop.App
 
 [<EntryPoint>]
 let main _ =
-    Console.writeln "HelloWayland: Fidelity.UI Splash"
-    // image is square
-    let logo = svgImage "/home/hhh/Pictures/Clef/Clef_logo_full.svg" 512 512
-    let title = label "Clef — Native by Design"
-                |> withColor (white ())
-                |> withFontSize 18
-
-    App.run "HelloWayland" logo title
+    Console.writeln "HelloWayland: Fidelity.UI Splash (animated 3D logo)"
+    HelloWaylandAnimate.run "HelloWayland"

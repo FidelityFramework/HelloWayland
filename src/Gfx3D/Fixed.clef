@@ -1,0 +1,57 @@
+/// Gfx3D.Fixed — integer fixed-point math primitives
+///
+/// The Fidelity toolchain has no libm binding and float lowering is
+/// unproven end-to-end, so everything here is integer fixed-point:
+/// Q8 (1/256) for coordinates and distances, Q12 (1/4096) for
+/// unit-scale values (radians, trig, normals, blend weights).
+/// Division by a power of two stands in for arithmetic shifts
+/// (shift operators are not in the proven Composer intrinsic set).
+module Gfx3D.Fixed
+
+/// Clamp v into [lo, hi].
+let clamp (v: int) (lo: int) (hi: int) : int =
+    if v < lo then lo
+    else if v > hi then hi
+    else v
+
+/// Linear interpolation from a to b by t8 in Q8 (0..256).
+let lerp8 (a: int) (b: int) (t8: int) : int =
+    a + ((b - a) * t8) / 256
+
+/// Integer square root (floor) via Newton iteration. n >= 0.
+let isqrt (n: int) : int =
+    if n <= 0 then 0
+    else
+        let mutable x = n
+        let mutable y = (x + 1) / 2
+        while y < x do
+            x <- y
+            y <- (x + n / x) / 2
+        x
+
+/// Smoothstep t*t*(3 - 2t) in Q8: input 0..256, output 0..256.
+/// Ease-in-out for the pivot oscillation (zero velocity at extremes).
+let smoothstep8 (t8: int) : int =
+    let t2 = t8 * t8
+    (t2 * (768 - 2 * t8)) / 65536
+
+/// Smoothstep in Q10 (input 0..1024, output 0..1024) — finer easing
+/// steps for per-millisecond animation phases. Staged to stay in int32:
+/// t2 <= 1024 after rescale, product <= 1024 * 3072.
+let smoothstep10 (t10: int) : int =
+    let t2 = (t10 * t10) / 1024
+    (t2 * (3072 - 2 * t10)) / 1024
+
+/// sin(theta) for small angles via theta - theta^3/6.
+/// Q12 in/out; accurate to ~4e-5 for |theta| <= 0.5 rad.
+let sinSmall12 (theta12: int) : int =
+    let t2 = (theta12 * theta12) / 4096
+    let t3 = (t2 * theta12) / 4096
+    theta12 - t3 / 6
+
+/// cos(theta) for small angles via 1 - theta^2/2 + theta^4/24.
+/// Q12 in/out; accurate to ~2e-5 for |theta| <= 0.5 rad.
+let cosSmall12 (theta12: int) : int =
+    let t2 = (theta12 * theta12) / 4096
+    let t4 = (t2 * t2) / 4096
+    4096 - t2 / 2 + t4 / 24

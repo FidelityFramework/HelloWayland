@@ -1,0 +1,125 @@
+/// Gfx3D.ClefModel — swept-sphere model of the Clef logo glyph
+///
+/// The bass-clef glyph decomposes into a union of spheres: a chain of
+/// varying-radius spheres swept along the swoop centerline (spiral hook,
+/// over the head ring, down the tapering tail) plus three discrete
+/// spheres (the two dots). The centerline control
+/// points were measured offline from Clef_logo_full.svg (circle fits of
+/// the head boundaries, station table of the tail) and are stored here
+/// as Q8 logo-viewBox units; Catmull-Rom subdivision at startup expands
+/// them into samples spaced ~0.2 of the local radius so adjacent
+/// impostors fuse into a smooth tube.
+module Gfx3D.ClefModel
+
+open Gfx3D.Fixed
+
+/// Swoop centerline control points, "x,y,r" Q8 triples separated by ';'.
+/// The chain BEGINS at the spiral bulb — the bulb is the stroke at its
+/// widest, not a separate sphere — then narrows out of the spiral, over
+/// the head ring, and tapers to the tail tip. r is the local stroke radius.
+let private chainData () : string = "9820,9830,4237;8268,9605,3129;6715,9380,1560;5549,9217,179;5792,7754,676;6372,6568,991;7316,5437,1356;8092,4204,1098;9008,3006,947;10084,2198,836;11457,1549,803;12752,1164,718;14261,1008,762;15598,1114,877;17030,1549,1031;18323,2247,1221;19444,3139,1545;20348,4200,1790;21181,5423,2124;21785,6724,2305;22229,8042,2539;22426,8841,2609;22582,10452,2688;22241,13775,2662;21668,15770,2550;21158,17042,2463;20355,18639,2337;19766,19651,2266;18808,21089,2145;17636,22646,2022;15716,24868,1800;14861,25764,1692;13051,27423,1498;11213,28936,1324;9341,30385,1155;8128,31286,1016;7040,32067,858;5304,33300,509;4626,33823,292"
+
+/// Discrete spheres: the two dots ("x,y,r" Q8). Everything else in the
+/// glyph is one continuous swept chain.
+let private discData () : string = "28296,15342,2258;28291,6054,2258"
+
+/// Parse non-negative integers separated by ',' or ';' into out.
+/// Returns the number of values written.
+let parseInts (s: string) (out: nativeptr<int32>) : int =
+    let n = String.length s
+    let mutable count = 0
+    let mutable acc = 0
+    let mutable i = 0
+    while i < n do
+        let code = int (String.charAt s i)
+        if code >= 48 && code <= 57 then
+            acc <- acc * 10 + (code - 48)
+        else
+            NativePtr.set out count (int32 acc)
+            count <- count + 1
+            acc <- 0
+        i <- i + 1
+    NativePtr.set out count (int32 acc)
+    count + 1
+
+/// Catmull-Rom interpolation of one component at t8 (Q8, 0..256):
+/// 0.5 * (2*p1 + (p2-p0)*t + (2p0-5p1+4p2-p3)*t^2 + (-p0+3p1-3p2+p3)*t^3)
+let catmull (p0: int) (p1: int) (p2: int) (p3: int) (t8: int) : int =
+    let t2 = (t8 * t8) / 256
+    let t3 = (t2 * t8) / 256
+    let a = p2 - p0
+    let b = 2 * p0 - 5 * p1 + 4 * p2 - p3
+    let c = 0 - p0 + 3 * p1 - 3 * p2 + p3
+    (2 * p1 * 256 + a * t8 + b * t2 + c * t3) / 512
+
+/// Build the sphere list: Catmull-Rom-subdivide the control chain with
+/// spacing ~max(0.4, 0.2*r) logo units, then append ball and dots.
+/// samples receives (x8, y8, r8) int32 triples; capacity 512 triples.
+/// Returns the sphere count (0 on allocation failure).
+let build (samples: nativeptr<int32>) : int =
+    let ctrlRaw =
+        match Fidelity.Libc.Memory.malloc (unativeint 1024) with
+        | Some v -> v
+        | None -> 0n
+    if ctrlRaw = 0n then 0
+    else
+    let ctrl = NativePtr.ofNativeInt<int32> ctrlRaw
+    let nVals = parseInts (chainData ()) ctrl
+    let nCtrl = nVals / 3
+    let mutable count = 0
+    let mutable i = 0
+    while i < nCtrl - 1 do
+        let i0 = if i > 0 then i - 1 else 0
+        let i3 = if i + 2 < nCtrl then i + 2 else nCtrl - 1
+        let p0x = int (NativePtr.get ctrl (i0 * 3 + 0))
+        let p0y = int (NativePtr.get ctrl (i0 * 3 + 1))
+        let p1x = int (NativePtr.get ctrl (i * 3 + 0))
+        let p1y = int (NativePtr.get ctrl (i * 3 + 1))
+        let p1r = int (NativePtr.get ctrl (i * 3 + 2))
+        let p2x = int (NativePtr.get ctrl ((i + 1) * 3 + 0))
+        let p2y = int (NativePtr.get ctrl ((i + 1) * 3 + 1))
+        let p2r = int (NativePtr.get ctrl ((i + 1) * 3 + 2))
+        let p3x = int (NativePtr.get ctrl (i3 * 3 + 0))
+        let p3y = int (NativePtr.get ctrl (i3 * 3 + 1))
+        let dx = p2x - p1x
+        let dy = p2y - p1y
+        let seg = Fixed.isqrt (dx * dx + dy * dy)
+        let rAvg = (p1r + p2r) / 2
+        let stepA = (rAvg * 31) / 256          // ~0.12 * r in Q8
+        let step = if stepA > 77 then stepA else 77
+        let mutable n = seg / step + 1
+        if n > 40 then n <- 40 else ()
+        let mutable j = 0
+        while j < n do
+            if count < 508 then
+                let t8 = (j * 256) / n
+                NativePtr.set samples (count * 3 + 0) (int32 (catmull p0x p1x p2x p3x t8))
+                NativePtr.set samples (count * 3 + 1) (int32 (catmull p0y p1y p2y p3y t8))
+                NativePtr.set samples (count * 3 + 2) (int32 (Fixed.lerp8 p1r p2r t8))
+                count <- count + 1
+            else
+                ()
+            j <- j + 1
+        i <- i + 1
+    // final control point closes the chain at the tail tip
+    if nCtrl > 0 && count < 508 then
+        NativePtr.set samples (count * 3 + 0) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 0))
+        NativePtr.set samples (count * 3 + 1) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 1))
+        NativePtr.set samples (count * 3 + 2) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 2))
+        count <- count + 1
+    else
+        ()
+    // ball and dots
+    let nDisc = parseInts (discData ()) ctrl
+    let mutable d = 0
+    while d < nDisc / 3 do
+        if count < 508 then
+            NativePtr.set samples (count * 3 + 0) (NativePtr.get ctrl (d * 3 + 0))
+            NativePtr.set samples (count * 3 + 1) (NativePtr.get ctrl (d * 3 + 1))
+            NativePtr.set samples (count * 3 + 2) (NativePtr.get ctrl (d * 3 + 2))
+            count <- count + 1
+        else
+            ()
+        d <- d + 1
+    Fidelity.Libc.Memory.free (Some ctrlRaw)
+    count

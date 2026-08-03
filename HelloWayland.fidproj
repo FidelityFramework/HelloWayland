@@ -1,7 +1,7 @@
 [package]
 name = "HelloWayland"
 version = "0.2.0"
-description = "Clef + Fidelity — Native Wayland Splash Screen (Fidelity.UI)"
+description = "Clef + Fidelity — Wayland splash, CPU-rasterised 3D logo"
 authors = ["SpeakEZ Technologies, Inc."]
 license = "MIT"
 
@@ -26,9 +26,14 @@ ui = { path = "../Fidelity.UI/Fidelity.UI.fidproj" }
 
 [build]
 sources = [
+    "src/Gfx3D/Fixed.clef",
+    "src/Gfx3D/Sprite.clef",
+    "src/Gfx3D/ClefModel.clef",
+    "src/Gfx3D/Scene.clef",
+    "src/Animate.clef",
     "src/Main.clef"
 ]
-output = "HelloWayland"
+output = "CPU-HelloWayland"
 output_kind = "console"
 
 [link]

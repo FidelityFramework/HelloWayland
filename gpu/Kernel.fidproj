@@ -1,0 +1,37 @@
+[package]
+name = "HelloWaylandKernel"
+version = "0.1.0"
+description = "Clef GPU rasteriser kernel — lowered to a gfx1151 code object"
+authors = ["SpeakEZ Technologies, Inc."]
+license = "MIT"
+
+# The kernel is compiled for its MLIR, not for a host binary: Composer's
+# middle end (Alex) emits portable dialects only (func/scf/arith/memref),
+# which the ROCDL pipeline consumes directly. `build-kernel.sh` runs
+# Composer with --emit-mlir, wraps the result in a gpu.module, and
+# lowers it to a .hsaco. That script is the prototype of the GPU backend
+# leg; internalised, it becomes BackEnd/GPU/{Lowering,Pipeline}.fs
+# alongside the existing AIE and CIRCT legs.
+[compilation]
+target = "cpu"
+
+[platform]
+runtime_model = "libc"
+os = "linux"
+arch = "x86_64"
+word_size = 64
+
+[dependencies]
+platform = { path = "../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
+
+[build]
+sources = [
+    "../src/Gfx3D/Fixed.clef",
+    "../src/Gpu/Kernel.clef",
+    "KernelMain.clef"
+]
+output = "HelloWaylandKernel"
+output_kind = "console"
+
+[link]
+libraries = []
