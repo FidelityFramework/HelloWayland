@@ -18,8 +18,9 @@ let main _ =
     let c = Geometry.projR8 9830 4237 0
     let d = Geometry.frontZ8 9830 4237 0
     let e = Geometry.lightAt 9830 9830 0
-    let f = Geometry.hitShade (a + 100) (b + 50) a b c d
+    let f = Geometry.hitDepth (a + 100) (b + 50) a b c d
+    let s = Geometry.shadeAt (a + 100) (b + 50) a b c d a b
     let tbl = Array.zeroCreate<int> 16
     Array.set tbl 0 4
     let g = Kernel.kernel 0 tbl 4
-    a + b + c + d + e + f + g
+    a + b + c + d + e + f + s + g

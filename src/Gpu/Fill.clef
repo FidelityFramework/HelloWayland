@@ -30,10 +30,13 @@ open Console
 open Fidelity.ROCm.Device
 open Fidelity.ROCm.Memory
 open Fidelity.ROCm.Module
-open Common.Fixed
-open Common.Anim
 
 let label () : string = "GPU (gfx1151 code object, device-dispatched)"
+
+/// The kernel writes the scanout buffer through its imported DMA-BUF
+/// alias, so the shell must NOT map it: gbm_bo_map/unmap round-trips a
+/// CPU staging copy that would overwrite the device's frame.
+let wantsCpuMapping () : int = 0
 
 // ── ABI note ────────────────────────────────────────────────
 // The generated bindings take the opaque handles as [<Struct>] records
@@ -49,6 +52,17 @@ let label () : string = "GPU (gfx1151 code object, device-dispatched)"
 [<FidelityExtern("amdhip64", "hipModuleGetFunction")>]
 let private hipModuleGetFunctionRaw (func: option<nativeint>) (hmod: nativeint)
                                     (kname: option<nativeptr<byte>>) : int =
+    NativeDefault.zeroed ()
+
+[<FidelityExtern("amdhip64", "hipImportExternalMemory")>]
+let private hipImportExternalMemoryRaw (extMem: option<nativeint>)
+                                       (desc: option<nativeint>) : int =
+    NativeDefault.zeroed ()
+
+[<FidelityExtern("amdhip64", "hipExternalMemoryGetMappedBuffer")>]
+let private hipExternalMemoryGetMappedBufferRaw (devPtr: option<nativeint>)
+                                                (extMem: nativeint)
+                                                (bufDesc: option<nativeint>) : int =
     NativeDefault.zeroed ()
 
 [<FidelityExtern("amdhip64", "hipModuleLaunchKernel")>]
@@ -83,6 +97,95 @@ let private deviceAlloc (bytes: int) : nativeint =
     let ptr = if rc = 0 then readHandle storage else 0n
     Fidelity.Libc.Memory.free (Some storage) |> ignore
     ptr
+
+// ── External-memory descriptors ─────────────────────────────
+// Declared as records so the COMPILER lays them out. The generated
+// bindings cannot be used here: Farscape emitted `handle: union` (a
+// placeholder type) and flattened `reserved[16]` to a single `uint`, so
+// the generated record neither type-checks nor matches the C struct.
+// These are what corrected Farscape output would look like; the eventual
+// home is a BAREWire schema, whose validated field offsets would replace
+// the explicit padding below (see BAREWire docs/04 Memory Mapping and
+// docs/08 Hardware Descriptors — the Region/View layer is still design).
+//
+// The C union is expressed as its widest member so the following fields
+// land where C puts them; no offset is ever written down.
+
+type HipExternalMemoryHandleDesc = {
+    Kind: int32          // hipExternalMemoryHandleType
+    KindPad: int32       // union alignment
+    Fd: int32            // union member: OpaqueFd
+    FdPad: int32
+    UnionTail: int64     // remainder of the widest union member
+    Size: int64
+    Flags: int32
+    FlagsPad: int32
+    Rsv0: int64
+    Rsv1: int64
+    Rsv2: int64
+    Rsv3: int64
+    Rsv4: int64
+    Rsv5: int64
+    Rsv6: int64
+    Rsv7: int64
+}
+
+type HipExternalMemoryBufferDesc = {
+    Offset: int64
+    BufSize: int64
+    BufFlags: int32
+    BufFlagsPad: int32
+    BRsv0: int64
+    BRsv1: int64
+    BRsv2: int64
+    BRsv3: int64
+    BRsv4: int64
+    BRsv5: int64
+    BRsv6: int64
+    BRsv7: int64
+}
+
+/// Import a GBM buffer's DMA-BUF handle into the device address space and
+/// return a device pointer that ALIASES it — no copy, on either side.
+///
+/// This is the point of a unified-memory part: the scanout buffer already
+/// lives in memory the GPU can address, so the frame never moves. Verified
+/// on gfx1151 — a device write is visible to the CPU immediately.
+let private importDmaBuf (fd: int) (bytes: int) : nativeint =
+    let handleDesc = {
+        Kind = int32 1                 // hipExternalMemoryHandleTypeOpaqueFd
+        KindPad = int32 0
+        Fd = int32 fd
+        FdPad = int32 0
+        UnionTail = int64 0
+        Size = int64 bytes
+        Flags = int32 0
+        FlagsPad = int32 0
+        Rsv0 = int64 0; Rsv1 = int64 0; Rsv2 = int64 0; Rsv3 = int64 0
+        Rsv4 = int64 0; Rsv5 = int64 0; Rsv6 = int64 0; Rsv7 = int64 0 }
+    let bufferDesc = {
+        Offset = int64 0
+        BufSize = int64 bytes
+        BufFlags = int32 0
+        BufFlagsPad = int32 0
+        BRsv0 = int64 0; BRsv1 = int64 0; BRsv2 = int64 0; BRsv3 = int64 0
+        BRsv4 = int64 0; BRsv5 = int64 0; BRsv6 = int64 0; BRsv7 = int64 0 }
+    let extStore =
+        match Fidelity.Libc.Memory.malloc (unativeint 8) with
+        | Some v -> v
+        | None -> 0n
+    let ptrStore =
+        match Fidelity.Libc.Memory.malloc (unativeint 8) with
+        | Some v -> v
+        | None -> 0n
+    if extStore = 0n || ptrStore = 0n then 0n
+    else
+    if hipImportExternalMemoryRaw (Some extStore) (Some (nativeint &handleDesc)) <> 0 then 0n
+    else
+    let ext = readHandle extStore
+    if hipExternalMemoryGetMappedBufferRaw (Some ptrStore) ext (Some (nativeint &bufferDesc)) <> 0 then 0n
+    else
+    readHandle ptrStore
 
 /// Acquire the device and load the Clef-compiled kernel. Runs once.
 let private bootstrap (fill: nativeptr<nativeint>) : int =
@@ -134,12 +237,7 @@ let resize (samples: nativeptr<int32>) (count: int)
     |> ignore
     if NativePtr.get fill 0 = 0n then 1
     else
-    let oldOut = NativePtr.get fill 3
-    let oldHost = NativePtr.get fill 4
-    if oldOut <> 0n then Fidelity.ROCm.Memory.hipFree (Some oldOut) |> ignore else ()
-    if oldHost <> 0n then Fidelity.Libc.Memory.free (Some oldHost) |> ignore else ()
-
-    let tableLen = 8 + count * 3
+    let tableLen = Common.Trace.tableSize count
     if NativePtr.get fill 7 = 0n then
         NativePtr.set fill 7 (hostAlloc (tableLen * 8))
         NativePtr.set fill 2 (deviceAlloc (tableLen * 8))
@@ -147,45 +245,21 @@ let resize (samples: nativeptr<int32>) (count: int)
         NativePtr.set fill 6 (hostAlloc 128)
         NativePtr.set fill 8 (nativeint tableLen)
     else ()
-    let hostOut = hostAlloc (w * h * 4)
-    let dOut = deviceAlloc (w * h * 4)
-    if hostOut = 0n || dOut = 0n || NativePtr.get fill 2 = 0n then
-        Console.writeln "Fill: device allocation failed"
+    // Import the two swapchain buffers so the kernel writes scanout directly.
+    let fd0 = int (NativePtr.get ctx 10)
+    let fd1 = int (NativePtr.get ctx 11)
+    let bytes = stride * h
+    let dev0 = importDmaBuf fd0 bytes
+    let dev1 = importDmaBuf fd1 bytes
+    if dev0 = 0n || dev1 = 0n || NativePtr.get fill 2 = 0n then
+        Console.writeln "Fill: DMA-BUF import failed"
         1
     else
-    NativePtr.set fill 3 dOut
-    NativePtr.set fill 4 hostOut
+    NativePtr.set fill 3 dev0
+    NativePtr.set fill 4 dev1
+    Console.writeln "Fill: swapchain imported zero-copy (no per-frame transfer)"
 
-    let offX = (w - 460) / 2
-    let offY = (h - 700) / 2
-    NativePtr.set ctx 6 (int32 (offX * 256 + 937))
-    NativePtr.set ctx 7 (int32 (offY * 256 + 5759))
-    NativePtr.set ctx 8 (int32 w)
-    NativePtr.set ctx 0 (int32 0)
-    NativePtr.set ctx 1 (int32 0)
-    NativePtr.set ctx 2 (int32 w)
-    NativePtr.set ctx 3 (int32 h)
     0
-
-/// Pack the kernel's shared table: frame header then sphere triples.
-let private fillTable (table: nativeptr<int64>) (samples: nativeptr<int32>) (count: int)
-                      (w: int) (h: int) (ox8: int) (oy8: int)
-                      (ct: int) (st: int) (bg: int) : unit =
-    NativePtr.set table 0 (int64 w)
-    NativePtr.set table 1 (int64 h)
-    NativePtr.set table 2 (int64 count)
-    NativePtr.set table 3 (int64 ct)
-    NativePtr.set table 4 (int64 st)
-    NativePtr.set table 5 (int64 ox8)
-    NativePtr.set table 6 (int64 oy8)
-    NativePtr.set table 7 (int64 bg)
-    let mutable k = 0
-    while k < count do
-        let b = 8 + k * 3
-        NativePtr.set table b (int64 (int (NativePtr.get samples (k * 3 + 0))))
-        NativePtr.set table (b + 1) (int64 (int (NativePtr.get samples (k * 3 + 1))))
-        NativePtr.set table (b + 2) (int64 (int (NativePtr.get samples (k * 3 + 2))))
-        k <- k + 1
 
 /// Build the kernelParams vector: pointers to argument values. MLIR expands
 /// each memref parameter into five scalars (allocated, aligned, offset,
@@ -212,23 +286,29 @@ let private fillLaunchArgs (slotsRaw: nativeint) (argvRaw: nativeint)
         i <- i + 1
 
 /// Dispatch one frame on the device and publish it into the mapped buffer.
-let frame (samples: nativeptr<int32>) (count: int)
-          (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
-          (mapped: nativeint) (stride: int) (theta12: int) : int =
-    let w = int (NativePtr.get ctx 4)
-    let h = int (NativePtr.get ctx 5)
-    let ox8 = int (NativePtr.get ctx 6)
-    let oy8 = int (NativePtr.get ctx 7)
+let frame (table: int array) (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+          (mapped: nativeint) (stride: int) : int =
+    let stridePx = Array.get table 0
     let tableRaw = NativePtr.get fill 7
-    let tableLen = int (NativePtr.get fill 8)
+    // Only the part the table actually uses needs to cross: the item
+    // array is sized for the worst case and is mostly empty.
+    let tableLen = Array.get table 15
     let dTable = NativePtr.get fill 2
-    let dOut = NativePtr.get fill 3
-    let hostOut = NativePtr.get fill 4
-    let n = w * h
+    // ctx[9] is the swapchain slot the shell wants painted this frame
+    let slot = int (NativePtr.get ctx 9)
+    let dOutBase = if slot = 0 then NativePtr.get fill 3 else NativePtr.get fill 4
+    // Same band the CPU build walks — the device pointer simply starts at
+    // the band's first row, so the generated wrapper's out[gid] still lands
+    // where it should.
+    let dOut = dOutBase + nativeint (Array.get table 16 * stride)
+    let n = Array.get table 17 * stridePx
 
-    let ct = Fixed.cosSmall12 theta12
-    let st = Fixed.sinSmall12 theta12
-    fillTable (NativePtr.ofNativeInt<int64> tableRaw) samples count w h ox8 oy8 ct st 30890
+    // The host filled the shared table; stage it for the device transfer.
+    let staging = NativePtr.ofNativeInt<int64> tableRaw
+    let mutable i = 0
+    while i < tableLen do
+        NativePtr.set staging i (int64 (Array.get table i))
+        i <- i + 1
 
     if int (Fidelity.ROCm.Memory.hipMemcpyHtoD dTable (Some tableRaw) (unativeint (tableLen * 8))) <> 0 then 1
     else
@@ -242,24 +322,5 @@ let frame (samples: nativeptr<int32>) (count: int)
     else
     if int (Fidelity.ROCm.Device.hipDeviceSynchronize ()) <> 0 then 1
     else
-    if int (Fidelity.ROCm.Memory.hipMemcpyDtoH (Some hostOut) dOut (unativeint (n * 4))) <> 0 then 1
-    else
-    // Device frame is packed 0x00RRGGBB; the GBM buffer is ABGR8888 with
-    // its own row stride, so publish row by row.
-    let src = NativePtr.ofNativeInt<byte> hostOut
-    let dst = NativePtr.ofNativeInt<byte> mapped
-    let mutable y = 0
-    while y < h do
-        let srcRow = y * w * 4
-        let dstRow = y * stride
-        let mutable x = 0
-        while x < w do
-            let so = srcRow + x * 4
-            let dof = dstRow + x * 4
-            NativePtr.set dst (dof + 0) (NativePtr.get src (so + 2))
-            NativePtr.set dst (dof + 1) (NativePtr.get src (so + 1))
-            NativePtr.set dst (dof + 2) (NativePtr.get src (so + 0))
-            NativePtr.set dst (dof + 3) (byte 255)
-            x <- x + 1
-        y <- y + 1
+    // Nothing to copy back: the kernel wrote the scanout buffer itself.
     0

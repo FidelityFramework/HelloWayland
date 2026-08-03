@@ -1,70 +1,12 @@
-/// Gpu.Kernel — the device entry point
+/// Gpu.Kernel — the device dispatch entry
 ///
-/// Deliberately thin. Every line of maths this kernel performs lives in
-/// Common.Geometry and Common.Fixed, compiled unchanged into both the CPU
-/// binary and this gfx1151 code object. What is specific to the device is
-/// only the shape of the work: a gather over the whole sphere table at
-/// every pixel, which the CPU build cannot afford and which the GPU gets
-/// nearly for free.
+/// The GPU backend leg looks for a function named `kernel` and wraps it in
+/// a gpu.func. That is all this file is: the name the leg binds to. Every
+/// pixel it produces comes from Common.Trace.pixel — the same definition
+/// the CPU build walks — so the two renderings cannot drift apart.
 module Gpu.Kernel
 
-open Common.Fixed
-open Common.Geometry
+open Common.Trace
 
-/// Kernel entry — the contract the GPU backend leg dispatches over.
-///   i    = global index (pixel number, row-major)
-///   data = shared read-only table every thread may index freely
-///   n    = size of the output domain (w * h)
-///
-/// The leg generates the gpu.func wrapper that supplies the index and the
-/// buffers and stores the result; everything between is ordinary Clef. A
-/// Clef `int array` parameter lowers to `memref<?xi64>`, so the wrapper
-/// hands its own memref straight through — no pointer, no cast, and the
-/// extent travels with the value.
-///
-/// Table layout (all Q8 unless noted):
-///   [0] window width      [1] window height    [2] sphere count
-///   [3] cos(theta) Q12    [4] sin(theta) Q12
-///   [5] origin x8         [6] origin y8        [7] background 0xRRGGBB
-///   [8..] sphere triples: x8, y8, r8
-///
-/// This is the gather the CPU renderer cannot afford: every pixel sweeps
-/// every sphere and keeps the nearest surface, which yields a true surface
-/// normal rather than a per-impostor one — so the seam where the swoop
-/// meets the bulb does not exist here.
 let kernel (i: int) (data: int array) (n: int) : int =
-    if i >= n then 0
-    else
-    let w = Array.get data 0
-    let count = Array.get data 2
-    let ct = Array.get data 3
-    let st = Array.get data 4
-    let ox8 = Array.get data 5
-    let oy8 = Array.get data 6
-    let bg = Array.get data 7
-    let gx = i % w
-    let gy = i / w
-    let pxQ8 = gx * 256
-    let pyQ8 = gy * 256
-    let mutable best = 0
-    let mutable found = 0
-    let mutable k = 0
-    while k < count do
-        let bas = 8 + k * 3
-        let sx = Array.get data bas
-        let sy = Array.get data (bas + 1)
-        let sr = Array.get data (bas + 2)
-        let cx8 = projX8 sx ct st ox8
-        let cy8 = projY8 sx sy st oy8
-        let rp8 = projR8 sx sr st
-        let z8 = frontZ8 sx sr st
-        let hit = hitShade pxQ8 pyQ8 cx8 cy8 rp8 z8
-        // Depth is packed above colour, so the nearest surface is simply the
-        // smallest packed value: one integer compare per sphere, which is
-        // what makes the brute-force sweep cheap on a wide machine.
-        let nearer = if found = 0 then 1 else (if hit < best then 1 else 0)
-        let take = if hit <> 0 then nearer else 0
-        best <- if take = 1 then hit else best
-        found <- if take = 1 then 1 else found
-        k <- k + 1
-    if found = 1 then best % 16777216 else bg
+    Trace.pixel i data n

@@ -1,0 +1,279 @@
+/// Common.Trace — THE renderer
+///
+/// One per-pixel ray tracer, compiled into both binaries from this file.
+/// The CPU build walks it in a loop; the GPU build dispatches one thread
+/// per pixel at it inside a gfx1151 code object. Neither has its own copy
+/// and neither has its own shading model — a pixel is a pixel.
+///
+/// `pixel` is a pure function of (index, table, count): no buffers in the
+/// signature beyond the shared read-only table, no state, no allocation.
+/// That is what lets the identical definition cross to the device.
+///
+/// The split between `fillTable` and `pixel` is the coeffect boundary.
+/// Anything a pixel would otherwise recompute identically for every pixel
+/// — the projection of a sphere, the reciprocal of the gradient span, which
+/// spheres can possibly cover a given tile — is *observed once* into the
+/// table and merely read in the inner loop. That is what makes the same
+/// gather affordable on one CPU core and on a whole GPU.
+///
+/// Table layout (int, Q8 unless noted):
+///   [0]  stride in pixels     [1]  window height
+///   [2]  sphere count         [3]  window width
+///   [4]  rx0  [5] ry0  [6] rx1  [7] ry1     glyph rect (screen px)
+///   [8]  tilesX               [9]  tilesY
+///   [10] 65536 / tileSize     [11] sphere record base
+///   [12] tile offset base     [13] tile item base
+///   [14] gradient reciprocal  [15] used length
+///   [16] band first row       [17] band row count
+///   [18] 2^38 / stride        [19] spare
+///   sphere records: 6 ints each — cx8 cy8 rp8 z8 lx8 ly8
+///   tile offsets:   tilesX*tilesY + 1 prefix sums into the item array
+///   tile items:     sphere indices, grouped by tile
+module Common.Trace
+
+open Common.Fixed
+open Common.Geometry
+
+/// Grid ceiling: the glyph is a fixed pixel size, so 64x64 tiles is ample
+/// at any window size, and the tile arrays can be sized once.
+let private maxTiles () : int = 4096
+
+/// How many ints the shared table needs for a model of `count` spheres.
+/// One definition, so the host and the device allocator cannot disagree.
+let tableSize (count: int) : int = 20 + count * 6 + (maxTiles () + 1) + count * 64
+
+/// Pack the frame description the tracer reads: project every sphere once,
+/// then bucket the projections into screen tiles. One definition, so the
+/// two substrates cannot disagree about what a frame is.
+let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
+              (stridePx: int) (h: int) (ox8: int) (oy8: int)
+              (ct: int) (st: int) (w: int)
+              (rx0: int) (ry0: int) (rx1: int) (ry1: int)
+              (bandY0: int) (bandRows: int) : unit =
+    let sphereBase = 20
+    let offsetBase = sphereBase + count * 6
+    let itemBase = offsetBase + maxTiles () + 1
+    let itemCap = count * 64
+
+    // Tiles are a power of two wide so the pixel-side divide is a multiply.
+    let rw = rx1 - rx0
+    let rh = ry1 - ry0
+    let mutable ts = 16
+    while rw / ts >= 63 || rh / ts >= 63 do
+        ts <- ts * 2
+    let tilesX = rw / ts + 1
+    let tilesY = rh / ts + 1
+    let nTiles = tilesX * tilesY
+
+    // Project each sphere once. This is the work the inner loop used to
+    // repeat per pixel: six functions, ~18 divides, all pixel-invariant.
+    let mutable k = 0
+    while k < count do
+        let sx = int (NativePtr.get samples (k * 3 + 0))
+        let sy = int (NativePtr.get samples (k * 3 + 1))
+        let sr = int (NativePtr.get samples (k * 3 + 2))
+        let b = sphereBase + k * 6
+        Array.set table b (projX8 sx ct st ox8)
+        Array.set table (b + 1) (projY8 sx sy st oy8)
+        Array.set table (b + 2) (projR8 sx sr st)
+        Array.set table (b + 3) (frontZ8 sx sr st)
+        Array.set table (b + 4) (logoX8 sx ct st)
+        Array.set table (b + 5) (logoY8 sx sy st)
+        k <- k + 1
+
+    // Pass 1: how many spheres land in each tile. Counts are written one
+    // slot high so the prefix sum below turns them into start offsets in
+    // place, without a second array.
+    let mutable t = 0
+    while t <= nTiles do
+        Array.set table (offsetBase + t) 0
+        t <- t + 1
+    k <- 0
+    while k < count do
+        let b = sphereBase + k * 6
+        let cx = Array.get table b / 256
+        let cy = Array.get table (b + 1) / 256
+        let rp = Array.get table (b + 2) / 256 + 1
+        let tx0 = Fixed.clamp ((cx - rp - rx0) / ts) 0 (tilesX - 1)
+        let tx1 = Fixed.clamp ((cx + rp - rx0) / ts) 0 (tilesX - 1)
+        let ty0 = Fixed.clamp ((cy - rp - ry0) / ts) 0 (tilesY - 1)
+        let ty1 = Fixed.clamp ((cy + rp - ry0) / ts) 0 (tilesY - 1)
+        let mutable ty = ty0
+        while ty <= ty1 do
+            let mutable tx = tx0
+            while tx <= tx1 do
+                let s = offsetBase + ty * tilesX + tx + 1
+                Array.set table s (Array.get table s + 1)
+                tx <- tx + 1
+            ty <- ty + 1
+        k <- k + 1
+
+    // Prefix sum: slot[t] becomes tile t's start, slot[t+1] its end.
+    // Saturating, so a pathological model truncates rather than overruns.
+    t <- 1
+    while t <= nTiles do
+        let s = offsetBase + t
+        let v = Array.get table (offsetBase + t - 1) + Array.get table s
+        Array.set table s (if v > itemCap then itemCap else v)
+        t <- t + 1
+    let used = Array.get table (offsetBase + nTiles)
+
+    // Pass 2: scatter, using each start offset as a cursor.
+    k <- 0
+    while k < count do
+        let b = sphereBase + k * 6
+        let cx = Array.get table b / 256
+        let cy = Array.get table (b + 1) / 256
+        let rp = Array.get table (b + 2) / 256 + 1
+        let tx0 = Fixed.clamp ((cx - rp - rx0) / ts) 0 (tilesX - 1)
+        let tx1 = Fixed.clamp ((cx + rp - rx0) / ts) 0 (tilesX - 1)
+        let ty0 = Fixed.clamp ((cy - rp - ry0) / ts) 0 (tilesY - 1)
+        let ty1 = Fixed.clamp ((cy + rp - ry0) / ts) 0 (tilesY - 1)
+        let mutable ty = ty0
+        while ty <= ty1 do
+            let mutable tx = tx0
+            while tx <= tx1 do
+                let s = offsetBase + ty * tilesX + tx
+                let cur = Array.get table s
+                if cur < Array.get table (s + 1) then
+                    Array.set table (itemBase + cur) k
+                    Array.set table s (cur + 1)
+                else ()
+                tx <- tx + 1
+            ty <- ty + 1
+        k <- k + 1
+
+    // Each cursor now holds its tile's end. Shifting the array up one slot
+    // restores starts, because tile t's start is tile t-1's end.
+    t <- nTiles
+    while t > 0 do
+        Array.set table (offsetBase + t) (Array.get table (offsetBase + t - 1))
+        t <- t - 1
+    Array.set table offsetBase 0
+    Array.set table (offsetBase + nTiles) used
+
+    // Order each tile front-to-back. Sorting here — once per tile per frame
+    // — is what lets the depth bound in `pixel` reject almost every
+    // candidate on the first compare, on either substrate.
+    t <- 0
+    while t < nTiles do
+        let s = Array.get table (offsetBase + t)
+        let e = Array.get table (offsetBase + t + 1)
+        let mutable p = s + 1
+        while p < e do
+            let v = Array.get table (itemBase + p)
+            let vz = Array.get table (sphereBase + v * 6 + 3)
+            let mutable q = p
+            let mutable sinking = 1
+            while sinking = 1 do
+                if q > s then
+                    let prevIdx = Array.get table (itemBase + q - 1)
+                    if Array.get table (sphereBase + prevIdx * 6 + 3) > vz then
+                        Array.set table (itemBase + q) prevIdx
+                        q <- q - 1
+                    else sinking <- 0
+                else sinking <- 0
+            Array.set table (itemBase + q) v
+            p <- p + 1
+        t <- t + 1
+
+    let total = w + h - 2
+    Array.set table 0 stridePx
+    Array.set table 1 h
+    Array.set table 2 count
+    Array.set table 3 w
+    Array.set table 4 rx0
+    Array.set table 5 ry0
+    Array.set table 6 rx1
+    Array.set table 7 ry1
+    Array.set table 8 tilesX
+    Array.set table 9 tilesY
+    Array.set table 10 (65536 / ts)
+    Array.set table 11 sphereBase
+    Array.set table 12 offsetBase
+    Array.set table 13 itemBase
+    Array.set table 14 (if total > 0 then (255 * 65536) / total else 0)
+    Array.set table 15 (itemBase + used)
+    Array.set table 16 bandY0
+    Array.set table 17 bandRows
+    // Row and column from one multiply instead of two divides: 2^38 is
+    // exact for any stride and index this shell can produce.
+    Array.set table 18 ((524288 * 524288) / stridePx + 1)
+    Array.set table 19 0
+
+/// Shade one pixel of the frame the table describes.
+let pixel (i: int) (data: int array) (n: int) : int =
+    if i >= n then 0
+    else
+    let stridePx = Array.get data 0
+    let h = Array.get data 1
+    let w = Array.get data 3
+    // The domain is a band of rows, not the whole window: outside the band
+    // the frame is unchanged from the full paint the shell did when the
+    // swapchain was built, so there is nothing to recompute.
+    let row = ((i * Array.get data 18) / 524288) / 524288
+    let gx = i - row * stridePx
+    let gy = Array.get data 16 + row
+    // Diagonal gradient, matching Compositing.paintDiagonalGradient. The
+    // span reciprocal comes from the table, so no pixel divides for it.
+    let t = ((gx + gy) * Array.get data 14) / 65536
+    let inv = 255 - t
+    let bgG = (100 * inv + 156 * t) / 255
+    let bgB = (178 * inv + 171 * t) / 255
+    let bg = 16777216 * 255 + bgB * 65536 + bgG * 256
+    if gx >= w then bg
+    else
+    let rx0 = Array.get data 4
+    let ry0 = Array.get data 5
+    let rx1 = Array.get data 6
+    let ry1 = Array.get data 7
+    let inside = if gx >= rx0 then (if gx < rx1 then (if gy >= ry0 then (if gy < ry1 then 1 else 0) else 0) else 0) else 0
+    if inside = 0 then bg
+    else
+    // Which tile this pixel belongs to, and hence which spheres can
+    // possibly cover it. Everything else is already excluded.
+    let recip = Array.get data 10
+    let tx = ((gx - rx0) * recip) / 65536
+    let ty = ((gy - ry0) * recip) / 65536
+    let ob = Array.get data 12
+    let ti = ob + ty * Array.get data 8 + tx
+    let first = Array.get data ti
+    let last = Array.get data (ti + 1)
+    let ib = Array.get data 13
+    let sb = Array.get data 11
+    let pxQ8 = gx * 256
+    let pyQ8 = gy * 256
+    let mutable bestDep = 0
+    let mutable bestRec = 0
+    let mutable found = 0
+    let mutable j = first
+    while j < last do
+        let b = sb + (Array.get data (ib + j)) * 6
+        // The front of a sphere bounds the depth of every point on it, so
+        // a candidate that starts behind the surface already found cannot
+        // win — one compare rejects it before any square root happens.
+        let bound = Array.get data (b + 3) + 1048576
+        let skip = if found = 1 then (if bound >= bestDep then 1 else 0) else 0
+        let dep =
+            if skip = 1 then 0
+            else hitDepth pxQ8 pyQ8
+                          (Array.get data b) (Array.get data (b + 1))
+                          (Array.get data (b + 2)) (Array.get data (b + 3))
+        let nearer = if found = 0 then 1 else (if dep < bestDep then 1 else 0)
+        let take = if dep <> 0 then nearer else 0
+        bestDep <- if take = 1 then dep else bestDep
+        bestRec <- if take = 1 then b else bestRec
+        found <- if take = 1 then 1 else found
+        j <- j + 1
+    if found = 0 then bg
+    else
+    // One shade, for the one sphere that turned out to be visible.
+    let c = shadeAt pxQ8 pyQ8
+                    (Array.get data bestRec) (Array.get data (bestRec + 1))
+                    (Array.get data (bestRec + 2)) (Array.get data (bestRec + 3))
+                    (Array.get data (bestRec + 4)) (Array.get data (bestRec + 5))
+    // shadeAt packs 0xRRGGBB; the surface wants ABGR8888 (byte 0 = R)
+    let r = c / 65536
+    let g = (c / 256) % 256
+    let b = c % 256
+    16777216 * 255 + b * 65536 + g * 256 + r

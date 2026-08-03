@@ -31,6 +31,7 @@ rocm = { path = "../Fidelity.Platform/GPU/AMD/RDNA3_5/Fidelity.ROCm.fidproj" }
 sources = [
     "src/Common/Fixed.clef",
     "src/Common/Geometry.clef",
+    "src/Common/Trace.clef",
     "src/Common/Model.clef",
     "src/Common/Anim.clef",
     "src/Gpu/Fill.clef",

@@ -28,10 +28,9 @@ ui = { path = "../Fidelity.UI/Fidelity.UI.fidproj" }
 sources = [
     "src/Common/Fixed.clef",
     "src/Common/Geometry.clef",
+    "src/Common/Trace.clef",
     "src/Common/Model.clef",
     "src/Common/Anim.clef",
-    "src/Cpu/Sprite.clef",
-    "src/Cpu/Raster.clef",
     "src/Cpu/Fill.clef",
     "src/Common/Host.clef",
     "src/Main.clef"

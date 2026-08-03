@@ -15,3 +15,44 @@ let angleAt (elapsedMs: int) : int =
     let t10 = if ph < 2000 then (ph * 1024) / 2000 else ((4000 - ph) * 1024) / 2000
     let e10 = Fixed.smoothstep10 t10
     0 - 2145 + (2 * 2145 * e10) / 1024
+
+/// Conservative screen bounding box of the glyph over the whole
+/// oscillation. The perspective divide amplifies both the radii and each
+/// sphere center's offset from the camera/pivot axes by up to
+/// s12max/4096 ~= 1.134 at the +-30 deg extremes, so both get a 16.7%
+/// margin (offset/6) on top of fixed padding. Reads the origin from
+/// ctx[6..7] and writes the clip rect into ctx[0..3] (window px,
+/// unclamped — the caller clamps to the window).
+let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) : unit =
+    let ox8 = int (NativePtr.get ctx 6)
+    let oy8 = int (NativePtr.get ctx 7)
+    let ax8 = ox8 + (13759 * 17423) / 4096
+    let ay8 = oy8 + (13759 * 17152) / 4096
+    let mutable minX = 1000000
+    let mutable minY = 1000000
+    let mutable maxX = 0 - 1000000
+    let mutable maxY = 0 - 1000000
+    let mutable k = 0
+    while k < count do
+        let x8 = int (NativePtr.get samples (k * 3 + 0))
+        let y8 = int (NativePtr.get samples (k * 3 + 1))
+        let r8 = int (NativePtr.get samples (k * 3 + 2))
+        let sx8 = ox8 + (13759 * x8) / 4096
+        let sy8 = oy8 + (13759 * y8) / 4096
+        let rp8 = (r8 * 13759) / 4096
+        let ext8 = rp8 + rp8 / 6            // radius * 1.167 perspective margin
+        let dxa8 = if sx8 > ax8 then sx8 - ax8 else ax8 - sx8
+        let dya8 = if sy8 > ay8 then sy8 - ay8 else ay8 - sy8
+        let cx = sx8 / 256
+        let cy = sy8 / 256
+        let ex = ext8 / 256 + (dxa8 / 6) / 256 + 1
+        let ey = ext8 / 256 + (dya8 / 6) / 256 + 1
+        if cx - ex < minX then minX <- cx - ex else ()
+        if cy - ey < minY then minY <- cy - ey else ()
+        if cx + ex > maxX then maxX <- cx + ex else ()
+        if cy + ey > maxY then maxY <- cy + ey else ()
+        k <- k + 1
+    NativePtr.set ctx 0 (int32 (minX - 6))
+    NativePtr.set ctx 1 (int32 (minY - 6))
+    NativePtr.set ctx 2 (int32 (maxX + 7))
+    NativePtr.set ctx 3 (int32 (maxY + 7))

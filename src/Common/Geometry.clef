@@ -26,8 +26,6 @@ let lightAt (px8: int) (py8: int) (pz8: int) : int =
     i10 * 4
 
 /// Rotate and project one sphere. Returns the Q8 screen x of the centre.
-
-/// Rotate and project one sphere. Returns the Q8 screen x of the centre.
 let projX8 (x8: int) (ct: int) (st: int) (ox8: int) : int =
     let rx8 = x8 - 17423
     let xr8 = (rx8 * ct) / 4096
@@ -37,8 +35,6 @@ let projX8 (x8: int) (ct: int) (st: int) (ox8: int) : int =
     ox8 + (13759 * px8) / 4096
 
 /// Q8 screen y of the projected centre.
-
-/// Q8 screen y of the projected centre.
 let projY8 (x8: int) (y8: int) (st: int) (oy8: int) : int =
     let rx8 = x8 - 17423
     let zr8 = (rx8 * st) / 4096
@@ -46,7 +42,19 @@ let projY8 (x8: int) (y8: int) (st: int) (oy8: int) : int =
     let py8 = 17152 + ((y8 - 17152) * s12) / 4096
     oy8 + (13759 * py8) / 4096
 
-/// Q8 screen radius after perspective.
+/// Rotated centre in LOGO space — what the light law consumes.
+let logoX8 (x8: int) (ct: int) (st: int) : int =
+    let rx8 = x8 - 17423
+    let xr8 = (rx8 * ct) / 4096
+    let zr8 = (rx8 * st) / 4096
+    let s12 = (66560 * 4096) / (66560 + zr8)
+    17423 + (xr8 * s12) / 4096
+
+let logoY8 (x8: int) (y8: int) (st: int) : int =
+    let rx8 = x8 - 17423
+    let zr8 = (rx8 * st) / 4096
+    let s12 = (66560 * 4096) / (66560 + zr8)
+    17152 + ((y8 - 17152) * s12) / 4096
 
 /// Q8 screen radius after perspective.
 let projR8 (x8: int) (r8: int) (st: int) : int =
@@ -56,28 +64,21 @@ let projR8 (x8: int) (r8: int) (st: int) : int =
     (((r8 * 13759) / 4096) * s12) / 4096
 
 /// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
-
-/// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
 let frontZ8 (x8: int) (r8: int) (st: int) : int =
     let rx8 = x8 - 17423
     (rx8 * st) / 4096 - r8
 
-/// Test pixel (pxQ8, pyQ8) against a projected sphere and, on a hit,
-/// return the packed result: (depth + 1048576) * 16777216 + colour,
-/// where colour is 0xRRGGBB. Returns 0 on a miss.
+/// Depth of a projected sphere at pixel (pxQ8, pyQ8): the biased Q8 depth
+/// of the front surface there, or 0 for a miss. Biased positive so the
+/// caller can just take the minimum.
 ///
-/// Depth is biased positive so the caller can compare packed values
-/// directly and take the minimum — one integer compare per sphere,
-/// which is what makes the brute-force sweep cheap on a wide machine.
-
-/// Test pixel (pxQ8, pyQ8) against a projected sphere and, on a hit,
-/// return the packed result: (depth + 1048576) * 16777216 + colour,
-/// where colour is 0xRRGGBB. Returns 0 on a miss.
-///
-/// Depth is biased positive so the caller can compare packed values
-/// directly and take the minimum — one integer compare per sphere,
-/// which is what makes the brute-force sweep cheap on a wide machine.
-let hitShade (pxQ8: int) (pyQ8: int)
+/// This is deliberately separate from shading. A pixel on the glyph is
+/// covered by a dozen or more spheres of the swept chain, and only one of
+/// them is visible, so depth is what the loop needs and colour is what the
+/// winner needs — computing both per candidate would shade the same pixel
+/// a dozen times over. Only nz is needed here, and it comes from one
+/// divide instead of the two the full normal costs.
+let hitDepth (pxQ8: int) (pyQ8: int)
              (cx8: int) (cy8: int) (rp8: int) (z8: int) : int =
     let dx8 = pxQ8 - cx8
     let dy8 = pyQ8 - cy8
@@ -85,6 +86,19 @@ let hitShade (pxQ8: int) (pyQ8: int)
     let r2 = rp8 * rp8
     if d2 > r2 then 0
     else
+    let nz2 = if r2 > 0 then 16777216 - (d2 * 16777216) / r2 else 16777216
+    let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
+    z8 + rp8 - (rp8 * nz) / 4096 + 1048576
+
+/// Colour of a projected sphere at pixel (pxQ8, pyQ8), packed 0xRRGGBB.
+/// (lx8, ly8) is the sphere's centre in LOGO space — the light law is an
+/// inverse square about the glyph, and screen coordinates are already
+/// scaled and offset, so feeding those in collapses the intensity.
+let shadeAt (pxQ8: int) (pyQ8: int)
+            (cx8: int) (cy8: int) (rp8: int) (z8: int)
+            (lx8: int) (ly8: int) : int =
+    let dx8 = pxQ8 - cx8
+    let dy8 = pyQ8 - cy8
     // surface normal, Q12, from the sphere equation
     let nx = if rp8 > 0 then Fixed.clamp ((dx8 * 4096) / rp8) (0 - 4096) 4096 else 0
     let ny = if rp8 > 0 then Fixed.clamp ((dy8 * 4096) / rp8) (0 - 4096) 4096 else 0
@@ -100,14 +114,11 @@ let hitShade (pxQ8: int) (pyQ8: int)
     let spec = (p32 * p8v) / 4096
     let lit = 737 + (3359 * ndl) / 4096
     let glint = (255 * ((3891 * spec) / 4096)) / 4096
-    // per-pixel light: the surface point, not the sphere centre
-    let inten = lightAt cx8 cy8 (z8 - (rp8 * nz) / 4096)
+    let inten = lightAt lx8 ly8 (z8 - (rp8 * nz) / 4096)
     let cr = Fixed.clamp ((((68 * lit) / 4096 + glint) * inten) / 4096) 0 255
     let cg = Fixed.clamp ((((38 * lit) / 4096 + glint) * inten) / 4096) 0 255
     let cb = Fixed.clamp ((((26 * lit) / 4096 + glint) * inten) / 4096) 0 255
-    // depth at this pixel: front of the sphere cap
-    let zHere = z8 + rp8 - (rp8 * nz) / 4096
-    (zHere + 1048576) * 16777216 + cr * 65536 + cg * 256 + cb
+    cr * 65536 + cg * 256 + cb
 
 /// Kernel entry — the contract the GPU backend leg dispatches over.
 ///   i    = global index (pixel number, row-major)

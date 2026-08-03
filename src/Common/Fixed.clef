@@ -19,15 +19,26 @@ let lerp8 (a: int) (b: int) (t8: int) : int =
     a + ((b - a) * t8) / 256
 
 /// Integer square root (floor) via Newton iteration. n >= 0.
+/// Square root, seeded then refined a fixed four times. This is called
+/// once per candidate sphere per pixel, so the iteration count is the
+/// tracer's inner cost: an open Newton loop from x = n takes a division
+/// per halving (a dozen for a Q24 argument), whereas a seed within a
+/// factor of two converges to integer precision in four.
 let isqrt (n: int) : int =
     if n <= 0 then 0
     else
-        let mutable x = n
-        let mutable y = (x + 1) / 2
-        while y < x do
-            x <- y
-            y <- (x + n / x) / 2
-        x
+        let mutable y = 4
+        if n > 16 then y <- 8 else ()
+        if n > 256 then y <- 32 else ()
+        if n > 4096 then y <- 128 else ()
+        if n > 65536 then y <- 512 else ()
+        if n > 1048576 then y <- 2048 else ()
+        if n > 16777216 then y <- 8192 else ()
+        y <- (y + n / y) / 2
+        y <- (y + n / y) / 2
+        y <- (y + n / y) / 2
+        y <- (y + n / y) / 2
+        if y * y > n then y - 1 else y
 
 /// Smoothstep t*t*(3 - 2t) in Q8: input 0..256, output 0..256.
 /// Ease-in-out for the pivot oscillation (zero velocity at extremes).

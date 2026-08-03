@@ -26,6 +26,7 @@ word_size = 64
 sources = [
     "src/Common/Fixed.clef",
     "src/Common/Geometry.clef",
+    "src/Common/Trace.clef",
     "src/Gpu/Kernel.clef",
     "src/Gpu/KernelMain.clef"
 ]
