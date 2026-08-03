@@ -1,0 +1,36 @@
+[package]
+name = "HelloWaylandKernel"
+version = "0.1.0"
+description = "Clef GPU rasteriser kernel — lowered to a gfx1151 code object"
+authors = ["SpeakEZ Technologies, Inc."]
+license = "MIT"
+
+# target = "gpu" routes to Composer's GPU backend leg
+# (Composer/src/BackEnd/GPU/), which takes the portable MLIR Alex emits,
+# assembles a gpu.module around the kernel's call-graph closure, and
+# lowers it through ROCDL to an AMD code object. Output: <output>.hsaco.
+# Chip via FIDELITY_GPU_CHIP (default gfx1151); kernel entry via
+# FIDELITY_GPU_KERNEL (default "kernel").
+[compilation]
+target = "gpu"
+
+[platform]
+runtime_model = "rocm"
+os = "linux"
+arch = "x86_64"
+word_size = 64
+
+[dependencies]
+
+[build]
+sources = [
+    "src/Common/Fixed.clef",
+    "src/Common/Geometry.clef",
+    "src/Gpu/Kernel.clef",
+    "src/Gpu/KernelMain.clef"
+]
+output = "gpu/HelloWaylandKernel"
+output_kind = "console"
+
+[link]
+libraries = []

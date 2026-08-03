@@ -1,0 +1,133 @@
+/// Common.Geometry — the transform, light and shading maths
+///
+/// One definition, compiled into both binaries. The CPU rasteriser calls
+/// these to shade sprite impostors; the GPU kernel calls the same
+/// functions per pixel inside a device code object. Everything here is
+/// pure integer arithmetic over scalars — no buffers, no state — which is
+/// exactly why it can cross to the device unchanged: a nativeptr
+/// parameter would arrive as a bare `index` with no extent and no address
+/// space, and the ROCDL pipeline could not legalise it.
+module Common.Geometry
+
+open Common.Fixed
+
+// Light: point source at (0, 0, -75) logo units, Q2 units (unit * 4),
+// reference d^2 = 235808 at the glyph centre.
+// Perspective: F8 = 66560, pivot axis PX8 = 17423, camera axis PY8 = 17152,
+// logo-unit -> screen scale K12 = 13759.
+
+/// Intensity at a point, Q12 (4096 = 1.0). Same law as Gfx3D.Scene.lightAt.
+let lightAt (px8: int) (py8: int) (pz8: int) : int =
+    let dx = px8 / 64
+    let dy = py8 / 64
+    let dz = pz8 / 64 + 300
+    let d2 = dx * dx + dy * dy + dz * dz
+    let i10 = if d2 > 0 then (235808 * 1024) / d2 else 1024
+    i10 * 4
+
+/// Rotate and project one sphere. Returns the Q8 screen x of the centre.
+
+/// Rotate and project one sphere. Returns the Q8 screen x of the centre.
+let projX8 (x8: int) (ct: int) (st: int) (ox8: int) : int =
+    let rx8 = x8 - 17423
+    let xr8 = (rx8 * ct) / 4096
+    let zr8 = (rx8 * st) / 4096
+    let s12 = (66560 * 4096) / (66560 + zr8)
+    let px8 = 17423 + (xr8 * s12) / 4096
+    ox8 + (13759 * px8) / 4096
+
+/// Q8 screen y of the projected centre.
+
+/// Q8 screen y of the projected centre.
+let projY8 (x8: int) (y8: int) (st: int) (oy8: int) : int =
+    let rx8 = x8 - 17423
+    let zr8 = (rx8 * st) / 4096
+    let s12 = (66560 * 4096) / (66560 + zr8)
+    let py8 = 17152 + ((y8 - 17152) * s12) / 4096
+    oy8 + (13759 * py8) / 4096
+
+/// Q8 screen radius after perspective.
+
+/// Q8 screen radius after perspective.
+let projR8 (x8: int) (r8: int) (st: int) : int =
+    let rx8 = x8 - 17423
+    let zr8 = (rx8 * st) / 4096
+    let s12 = (66560 * 4096) / (66560 + zr8)
+    (((r8 * 13759) / 4096) * s12) / 4096
+
+/// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
+
+/// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
+let frontZ8 (x8: int) (r8: int) (st: int) : int =
+    let rx8 = x8 - 17423
+    (rx8 * st) / 4096 - r8
+
+/// Test pixel (pxQ8, pyQ8) against a projected sphere and, on a hit,
+/// return the packed result: (depth + 1048576) * 16777216 + colour,
+/// where colour is 0xRRGGBB. Returns 0 on a miss.
+///
+/// Depth is biased positive so the caller can compare packed values
+/// directly and take the minimum — one integer compare per sphere,
+/// which is what makes the brute-force sweep cheap on a wide machine.
+
+/// Test pixel (pxQ8, pyQ8) against a projected sphere and, on a hit,
+/// return the packed result: (depth + 1048576) * 16777216 + colour,
+/// where colour is 0xRRGGBB. Returns 0 on a miss.
+///
+/// Depth is biased positive so the caller can compare packed values
+/// directly and take the minimum — one integer compare per sphere,
+/// which is what makes the brute-force sweep cheap on a wide machine.
+let hitShade (pxQ8: int) (pyQ8: int)
+             (cx8: int) (cy8: int) (rp8: int) (z8: int) : int =
+    let dx8 = pxQ8 - cx8
+    let dy8 = pyQ8 - cy8
+    let d2 = dx8 * dx8 + dy8 * dy8
+    let r2 = rp8 * rp8
+    if d2 > r2 then 0
+    else
+    // surface normal, Q12, from the sphere equation
+    let nx = if rp8 > 0 then Fixed.clamp ((dx8 * 4096) / rp8) (0 - 4096) 4096 else 0
+    let ny = if rp8 > 0 then Fixed.clamp ((dy8 * 4096) / rp8) (0 - 4096) 4096 else 0
+    let nz2 = 16777216 - nx * nx - ny * ny
+    let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
+    let ndl = Fixed.clamp ((nx * (0 - 1562) + ny * (0 - 1726) + nz * 3370) / 4096) 0 4096
+    let ndh = Fixed.clamp ((nx * (0 - 818) + ny * (0 - 904) + nz * 3910) / 4096) 0 4096
+    let p2 = (ndh * ndh) / 4096
+    let p4 = (p2 * p2) / 4096
+    let p8v = (p4 * p4) / 4096
+    let p16 = (p8v * p8v) / 4096
+    let p32 = (p16 * p16) / 4096
+    let spec = (p32 * p8v) / 4096
+    let lit = 737 + (3359 * ndl) / 4096
+    let glint = (255 * ((3891 * spec) / 4096)) / 4096
+    // per-pixel light: the surface point, not the sphere centre
+    let inten = lightAt cx8 cy8 (z8 - (rp8 * nz) / 4096)
+    let cr = Fixed.clamp ((((68 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    let cg = Fixed.clamp ((((38 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    let cb = Fixed.clamp ((((26 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    // depth at this pixel: front of the sphere cap
+    let zHere = z8 + rp8 - (rp8 * nz) / 4096
+    (zHere + 1048576) * 16777216 + cr * 65536 + cg * 256 + cb
+
+/// Kernel entry — the contract the GPU backend leg dispatches over.
+///   i    = global index (pixel number, row-major)
+///   data = shared read-only table every thread may index freely
+///   n    = size of the output domain (w * h)
+///
+/// The leg generates the gpu.func wrapper that supplies the index and the
+/// buffers and stores the result; everything between is ordinary Clef. A
+/// Clef `int array` parameter lowers to `memref<?xi64>`, so the wrapper
+/// hands its own memref straight through — no pointer, no cast, and the
+/// extent travels with the value.
+///
+/// Table layout (all Q8 unless noted):
+///   [0] window width      [1] window height    [2] sphere count
+///   [3] cos(theta) Q12    [4] sin(theta) Q12
+///   [5] origin x8         [6] origin y8        [7] background 0xRRGGBB
+///   [8..] sphere triples: x8, y8, r8
+///
+/// This is the gather the CPU renderer cannot afford: every pixel sweeps
+/// every sphere and keeps the nearest surface, which yields a true surface
+/// normal rather than a per-impostor one — so the seam where the swoop
+/// meets the bulb does not exist here.
+

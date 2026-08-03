@@ -1,4 +1,4 @@
-/// Gfx3D.Fixed — integer fixed-point math primitives
+/// Common.Fixed — integer fixed-point math primitives
 ///
 /// The Fidelity toolchain has no libm binding and float lowering is
 /// unproven end-to-end, so everything here is integer fixed-point:
@@ -6,7 +6,7 @@
 /// unit-scale values (radians, trig, normals, blend weights).
 /// Division by a power of two stands in for arithmetic shifts
 /// (shift operators are not in the proven Composer intrinsic set).
-module Gfx3D.Fixed
+module Common.Fixed
 
 /// Clamp v into [lo, hi].
 let clamp (v: int) (lo: int) (hi: int) : int =

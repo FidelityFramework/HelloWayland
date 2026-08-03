@@ -1,0 +1,265 @@
+/// Fill (GPU) — device-dispatch implementation of the fill contract
+///
+/// The other file providing `module Fill`. Identical signatures to
+/// FillCpu.clef, so the host shell above is byte-for-byte the same
+/// program; the fidproj decides which substrate answers.
+///
+/// Nothing here computes a pixel. It acquires the device, loads the code
+/// object Composer's GPU backend leg produced from src/Gpu/Kernel.clef,
+/// and dispatches one thread per pixel:
+///
+///   hipInit                 acquire the device
+///   hipModuleLoad           load the Clef-compiled code object
+///   hipModuleGetFunction    resolve the generated dispatch entry
+///   hipMalloc               device buffers for the table and the frame
+///   ...per frame:
+///   hipMemcpyHtoD           upload the frame header + geometry
+///   hipModuleLaunchKernel   one thread per pixel
+///   hipMemcpyDtoH           bring the frame back
+///
+/// The kernel evaluates every sphere at every pixel and keeps the nearest
+/// surface — a gather the CPU build cannot afford, and the reason this
+/// path resolves the swoop/bulb junction from true surface geometry.
+///
+/// Fill-owned state (the `fill` slot buffer):
+///   [0] module  [1] function  [2] dTable  [3] dOut  [4] hostOut
+///   [5] argSlots  [6] argv  [7] table  [8] table length
+module Fill
+
+open Console
+open Fidelity.ROCm.Device
+open Fidelity.ROCm.Memory
+open Fidelity.ROCm.Module
+open Common.Fixed
+open Common.Anim
+
+let label () : string = "GPU (gfx1151 code object, device-dispatched)"
+
+// ── ABI note ────────────────────────────────────────────────
+// The generated bindings take the opaque handles as [<Struct>] records
+// ({ Handle: nativeint }). Composer currently marshals a record argument
+// by pointer, which is correct for a wide struct such as resvg_transform
+// but wrong for a single-word handle the C ABI passes in a register: HIP
+// then reads the address of our slot as the module and answers
+// hipErrorNotFound (500). These app-local externs declare the same
+// symbols with the handle as a plain pointer, matching the C signature
+// exactly. They should be deleted once small-struct byval marshalling
+// lands; nothing else here depends on them.
+
+[<FidelityExtern("amdhip64", "hipModuleGetFunction")>]
+let private hipModuleGetFunctionRaw (func: option<nativeint>) (hmod: nativeint)
+                                    (kname: option<nativeptr<byte>>) : int =
+    NativeDefault.zeroed ()
+
+[<FidelityExtern("amdhip64", "hipModuleLaunchKernel")>]
+let private hipModuleLaunchKernelRaw (f: nativeint)
+                                     (gridX: uint32) (gridY: uint32) (gridZ: uint32)
+                                     (blockX: uint32) (blockY: uint32) (blockZ: uint32)
+                                     (sharedMem: uint32) (stream: nativeint)
+                                     (kernelParams: option<nativeint>)
+                                     (extra: option<nativeint>) : int =
+    NativeDefault.zeroed ()
+
+let private kernelPath () : string =
+    "/home/hhh/repos/HelloWayland/targets/gpu/HelloWaylandKernel.hsaco"
+
+/// Symbol name of the dispatch wrapper the GPU backend leg generates.
+let private kernelSymbol () : string = "clef_kernel"
+
+let private readHandle (storage: nativeint) : nativeint =
+    NativePtr.read (NativePtr.ofNativeInt<nativeint> storage)
+
+let private hostAlloc (bytes: int) : nativeint =
+    match Fidelity.Libc.Memory.malloc (unativeint bytes) with
+    | Some v -> v
+    | None -> 0n
+
+/// Allocate a device buffer, returning its address (0n on failure).
+let private deviceAlloc (bytes: int) : nativeint =
+    let storage = hostAlloc 8
+    if storage = 0n then 0n
+    else
+    let rc = int (Fidelity.ROCm.Memory.hipMalloc (Some storage) (unativeint bytes))
+    let ptr = if rc = 0 then readHandle storage else 0n
+    Fidelity.Libc.Memory.free (Some storage) |> ignore
+    ptr
+
+/// Acquire the device and load the Clef-compiled kernel. Runs once.
+let private bootstrap (fill: nativeptr<nativeint>) : int =
+    if int (Fidelity.ROCm.Device.hipInit (uint 0)) <> 0 then
+        Console.writeln "Fill: hipInit failed"
+        1
+    else
+    let modStorage = hostAlloc 8
+    let fnStorage = hostAlloc 8
+    if modStorage = 0n || fnStorage = 0n then 1
+    else
+    let path = kernelPath ()
+    NativePtr.write (NativePtr.ofNativeInt<nativeint> modStorage) 0n
+    let loadRc = int (Fidelity.ROCm.Module.hipModuleLoad (Some modStorage) (Some path.Pointer))
+    Console.write "Fill: hipModuleLoad rc="
+    Console.writeln (Format.int loadRc)
+    if loadRc <> 0 then
+        Console.write "Fill: failed to load code object "
+        Console.writeln path
+        1
+    else
+    let moduleHandle = readHandle modStorage
+    Console.write "Fill: module handle="
+    Console.writeln (Format.int (int moduleHandle))
+    let sym = kernelSymbol ()
+    let getRc = hipModuleGetFunctionRaw (Some fnStorage) moduleHandle (Some sym.Pointer)
+    if getRc <> 0 then
+        Console.write "Fill: kernel symbol lookup failed rc="
+        Console.write (Format.int getRc)
+        Console.write " sym="
+        Console.writeln sym
+        1
+    else
+    NativePtr.set fill 0 moduleHandle
+    NativePtr.set fill 1 (readHandle fnStorage)
+    Fidelity.Libc.Memory.free (Some modStorage) |> ignore
+    Fidelity.Libc.Memory.free (Some fnStorage) |> ignore
+    Console.write "Fill: loaded "
+    Console.writeln path
+    0
+
+/// (Re)allocate device and staging buffers for the window size.
+let resize (samples: nativeptr<int32>) (count: int)
+           (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+           (w: int) (h: int) (stride: int) : int =
+    if NativePtr.get fill 0 = 0n then
+        if bootstrap fill <> 0 then 1 else 0
+    else 0
+    |> ignore
+    if NativePtr.get fill 0 = 0n then 1
+    else
+    let oldOut = NativePtr.get fill 3
+    let oldHost = NativePtr.get fill 4
+    if oldOut <> 0n then Fidelity.ROCm.Memory.hipFree (Some oldOut) |> ignore else ()
+    if oldHost <> 0n then Fidelity.Libc.Memory.free (Some oldHost) |> ignore else ()
+
+    let tableLen = 8 + count * 3
+    if NativePtr.get fill 7 = 0n then
+        NativePtr.set fill 7 (hostAlloc (tableLen * 8))
+        NativePtr.set fill 2 (deviceAlloc (tableLen * 8))
+        NativePtr.set fill 5 (hostAlloc 128)
+        NativePtr.set fill 6 (hostAlloc 128)
+        NativePtr.set fill 8 (nativeint tableLen)
+    else ()
+    let hostOut = hostAlloc (w * h * 4)
+    let dOut = deviceAlloc (w * h * 4)
+    if hostOut = 0n || dOut = 0n || NativePtr.get fill 2 = 0n then
+        Console.writeln "Fill: device allocation failed"
+        1
+    else
+    NativePtr.set fill 3 dOut
+    NativePtr.set fill 4 hostOut
+
+    let offX = (w - 460) / 2
+    let offY = (h - 700) / 2
+    NativePtr.set ctx 6 (int32 (offX * 256 + 937))
+    NativePtr.set ctx 7 (int32 (offY * 256 + 5759))
+    NativePtr.set ctx 8 (int32 w)
+    NativePtr.set ctx 0 (int32 0)
+    NativePtr.set ctx 1 (int32 0)
+    NativePtr.set ctx 2 (int32 w)
+    NativePtr.set ctx 3 (int32 h)
+    0
+
+/// Pack the kernel's shared table: frame header then sphere triples.
+let private fillTable (table: nativeptr<int64>) (samples: nativeptr<int32>) (count: int)
+                      (w: int) (h: int) (ox8: int) (oy8: int)
+                      (ct: int) (st: int) (bg: int) : unit =
+    NativePtr.set table 0 (int64 w)
+    NativePtr.set table 1 (int64 h)
+    NativePtr.set table 2 (int64 count)
+    NativePtr.set table 3 (int64 ct)
+    NativePtr.set table 4 (int64 st)
+    NativePtr.set table 5 (int64 ox8)
+    NativePtr.set table 6 (int64 oy8)
+    NativePtr.set table 7 (int64 bg)
+    let mutable k = 0
+    while k < count do
+        let b = 8 + k * 3
+        NativePtr.set table b (int64 (int (NativePtr.get samples (k * 3 + 0))))
+        NativePtr.set table (b + 1) (int64 (int (NativePtr.get samples (k * 3 + 1))))
+        NativePtr.set table (b + 2) (int64 (int (NativePtr.get samples (k * 3 + 2))))
+        k <- k + 1
+
+/// Build the kernelParams vector: pointers to argument values. MLIR expands
+/// each memref parameter into five scalars (allocated, aligned, offset,
+/// size, stride), so two memrefs plus a count is eleven slots.
+let private fillLaunchArgs (slotsRaw: nativeint) (argvRaw: nativeint)
+                           (tablePtr: nativeint) (tableLen: int)
+                           (outPtr: nativeint) (outLen: int) (n: int) : unit =
+    let slots = NativePtr.ofNativeInt<nativeint> slotsRaw
+    let argv = NativePtr.ofNativeInt<nativeint> argvRaw
+    NativePtr.set slots 0 tablePtr
+    NativePtr.set slots 1 tablePtr
+    NativePtr.set slots 2 0n
+    NativePtr.set slots 3 (nativeint tableLen)
+    NativePtr.set slots 4 1n
+    NativePtr.set slots 5 outPtr
+    NativePtr.set slots 6 outPtr
+    NativePtr.set slots 7 0n
+    NativePtr.set slots 8 (nativeint outLen)
+    NativePtr.set slots 9 1n
+    NativePtr.set slots 10 (nativeint n)
+    let mutable i = 0
+    while i < 11 do
+        NativePtr.set argv i (slotsRaw + nativeint (i * 8))
+        i <- i + 1
+
+/// Dispatch one frame on the device and publish it into the mapped buffer.
+let frame (samples: nativeptr<int32>) (count: int)
+          (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+          (mapped: nativeint) (stride: int) (theta12: int) : int =
+    let w = int (NativePtr.get ctx 4)
+    let h = int (NativePtr.get ctx 5)
+    let ox8 = int (NativePtr.get ctx 6)
+    let oy8 = int (NativePtr.get ctx 7)
+    let tableRaw = NativePtr.get fill 7
+    let tableLen = int (NativePtr.get fill 8)
+    let dTable = NativePtr.get fill 2
+    let dOut = NativePtr.get fill 3
+    let hostOut = NativePtr.get fill 4
+    let n = w * h
+
+    let ct = Fixed.cosSmall12 theta12
+    let st = Fixed.sinSmall12 theta12
+    fillTable (NativePtr.ofNativeInt<int64> tableRaw) samples count w h ox8 oy8 ct st 30890
+
+    if int (Fidelity.ROCm.Memory.hipMemcpyHtoD dTable (Some tableRaw) (unativeint (tableLen * 8))) <> 0 then 1
+    else
+    fillLaunchArgs (NativePtr.get fill 5) (NativePtr.get fill 6) dTable tableLen dOut n n
+    let blocks = (n + 255) / 256
+    if hipModuleLaunchKernelRaw (NativePtr.get fill 1)
+                (uint32 blocks) (uint32 1) (uint32 1)
+                (uint32 256) (uint32 1) (uint32 1)
+                (uint32 0) 0n
+                (Some (NativePtr.get fill 6)) None <> 0 then 1
+    else
+    if int (Fidelity.ROCm.Device.hipDeviceSynchronize ()) <> 0 then 1
+    else
+    if int (Fidelity.ROCm.Memory.hipMemcpyDtoH (Some hostOut) dOut (unativeint (n * 4))) <> 0 then 1
+    else
+    // Device frame is packed 0x00RRGGBB; the GBM buffer is ABGR8888 with
+    // its own row stride, so publish row by row.
+    let src = NativePtr.ofNativeInt<byte> hostOut
+    let dst = NativePtr.ofNativeInt<byte> mapped
+    let mutable y = 0
+    while y < h do
+        let srcRow = y * w * 4
+        let dstRow = y * stride
+        let mutable x = 0
+        while x < w do
+            let so = srcRow + x * 4
+            let dof = dstRow + x * 4
+            NativePtr.set dst (dof + 0) (NativePtr.get src (so + 2))
+            NativePtr.set dst (dof + 1) (NativePtr.get src (so + 1))
+            NativePtr.set dst (dof + 2) (NativePtr.get src (so + 0))
+            NativePtr.set dst (dof + 3) (byte 255)
+            x <- x + 1
+        y <- y + 1
+    0

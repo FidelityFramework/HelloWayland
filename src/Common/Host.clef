@@ -1,27 +1,23 @@
-/// HelloWaylandAnimate — frame-callback-driven animated splash
+/// Common.Host — the substrate-neutral application shell
 ///
-/// Replaces App.run's render-once flow with a wl_surface::frame paced
-/// loop: the compositor's frame-done callback (one-shot wl_callback)
-/// supplies a millisecond timestamp that drives the glyph pivot angle,
-/// and each frame re-renders into the back GBM buffer of a two-buffer
-/// swapchain before attach + damage + commit. The blocking
-/// wl_display_dispatch is the frame throttle — the compositor fires
-/// frame-done at its refresh rate (60 Hz baseline), so the animation
-/// automatically matches the display update rate.
+/// Window, GBM swapchain, frame-callback pacing, resize handling and
+/// DMA-BUF presentation: identical for every substrate, compiled once.
+/// The only thing it does not know is how a frame gets painted — that is
+/// `Fill`, and which implementation of `Fill` is compiled is decided by
+/// the fidproj:
 ///
-/// The window is responsive (docs/responsive_layout.md): a local
-/// xdg_toplevel configure callback records the compositor-assigned size
-/// (ping/ack/close reuse the Platform.Display.Callbacks symbols), the
-/// swapchain and backdrop are rebuilt at that size, and the splash
-/// content re-centers. The backdrop (gradient + no-glyph splash SVG)
-/// renders once per size into a stride-matched shadow buffer; per frame
-/// it is restored with a single memcpy, the depth buffer is cleared with
-/// a single memset, then the 3D glyph draws over it (Gfx3D.Scene).
+///   HelloWayland.fidproj      -> src/Cpu/Fill.clef   (links no ROCm)
+///   HelloWayland.GPU.fidproj  -> src/Gpu/Fill.clef   (loads a code object)
 ///
-/// Shared state buffer layout (16 bytes, malloc'd):
-///   nativeint slot 0 = close flag (Platform.Display.Callbacks.toplevelClose)
-///   int32 slots 2, 3 = configure width, height (toplevelConfigure below)
-module HelloWaylandAnimate
+/// So the two binaries differ by one file in a source list. Everything
+/// above the fill contract — including the animation curve in Common.Anim
+/// and the geometry in Common.Model — is one definition.
+///
+/// The blocking wl_display_dispatch is the frame throttle: the compositor
+/// fires frame-done at its refresh rate, so the animation matches the
+/// display without timers, and occlusion pauses it for free.
+///
+module Common.Host
 
 open Console
 open Fidelity.Wayland.Core
@@ -33,16 +29,13 @@ open Fidelity.Wayland.Bridge.Callbacks
 open Platform.Display.Connection
 open Platform.Display.Surface
 open Platform.Display.Graphics
-open Platform.Display.Svg
-open Platform.Display.Compositing
-open Gfx3D.Fixed
-open Gfx3D.Sprite
-open Gfx3D.ClefModel
-open Gfx3D.Scene
+open Common.Fixed
+open Common.Model
+open Common.Anim
 
 /// wl_callback::done handler for wl_surface::frame — the animation clock.
 /// data points to 2 uint32 slots: [0] = frame-ready flag, [1] = timestamp ms.
-/// Resolved at runtime via dlsym as "HelloWaylandAnimate.frameDone";
+/// Resolved at runtime via dlsym as "Common.Host.frameDone";
 /// the one-shot callback proxy is destroyed here and re-requested per frame.
 let frameDone (data: nativeint) (callback: nativeint) (callbackData: uint32) : unit =
     wl_proxy_destroy (Some callback)
@@ -53,7 +46,7 @@ let frameDone (data: nativeint) (callback: nativeint) (callbackData: uint32) : u
 /// xdg_toplevel::configure handler — records the compositor-assigned
 /// window size (0 means "no preference"). data is the shared state
 /// buffer; width/height land in int32 slots 2 and 3.
-/// Resolved via dlsym as "HelloWaylandAnimate.toplevelConfigure".
+/// Resolved via dlsym as "Common.Host.toplevelConfigure".
 let toplevelConfigure (data: nativeint) (toplevel: nativeint)
                       (width: int32) (height: int32)
                       (states: nativeint) : unit =
@@ -74,13 +67,13 @@ let createAnimatedToplevel (display: nativeint) (compositor: nativeint)
 
     match wl_compositor_create_surface compositor with
     | None ->
-        Console.writeln "Animate: failed to create surface"
+        Console.writeln "Host: failed to create surface"
         None
     | Some surf ->
 
     match xdg_wm_base_get_xdg_surface xdgWmBase surf with
     | None ->
-        Console.writeln "Animate: failed to get xdg_surface"
+        Console.writeln "Host: failed to get xdg_surface"
         None
     | Some xdgSurf ->
 
@@ -90,12 +83,12 @@ let createAnimatedToplevel (display: nativeint) (compositor: nativeint)
 
     match xdg_surface_get_toplevel xdgSurf with
     | None ->
-        Console.writeln "Animate: failed to get toplevel"
+        Console.writeln "Host: failed to get toplevel"
         None
     | Some tl ->
 
     let toplevelListener = buildXdgToplevelListener
-                            "HelloWaylandAnimate.toplevelConfigure"
+                            "Common.Host.toplevelConfigure"
                             "Platform.Display.Callbacks.toplevelClose"
                             "Platform.Display.Callbacks.toplevelConfigureBounds"
                             "Platform.Display.Callbacks.toplevelWmCapabilities"
@@ -134,12 +127,9 @@ let createWlBuffer (dmabuf: nativeint) (fd: int) (width: int) (height: int)
 
 /// (Re)build the swapchain and static per-size data for window (w, h).
 /// handles = 10 nativeint slots, zero-initialized before the first call:
-///   [0] bo0  [1] bo1  [2] wlBuf0  [3] wlBuf1  [4] backdrop  [5] zbuf
-///   [6] map stride (as nativeint)  [7] fd0  [8] fd1  [9] splash pixmap
-///   [10] staging canvas (cached RAM — GBM maps are write-combined, so
-///   drawing happens here and one streaming memcpy publishes the frame)
-///   [11] 128-bank intensity LUT (32 KB, filled once by Scene.initLightBanks)
-///   (slots 9 and 11 are set once by the caller and never torn down here)
+///   [0] bo0  [1] bo1  [2] wlBuf0  [3] wlBuf1
+///   [6] map stride (as nativeint)  [7] fd0  [8] fd1
+///   [12] the substrate's Fill state block
 /// Existing entries are destroyed first. ctx receives the window size,
 /// glyph origin, zbuf stride, and clip rect. Returns 0 on success.
 let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
@@ -147,7 +137,6 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
                      (strideStorage: nativeint) (mapDataStorage: nativeint)
                      (ctx: nativeptr<int32>) (handles: nativeptr<nativeint>)
                      (w: int) (h: int) : int =
-    let splashPix = NativePtr.get handles 9
     // tear down the previous size, if any
     let oldWlBuf0 = NativePtr.get handles 2
     let oldWlBuf1 = NativePtr.get handles 3
@@ -188,41 +177,16 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
     let mapData1 = NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage)
     Graphics.unmapBuffer bo1 mapData1
     if stride1 <> stride then
-        Console.writeln "Animate: swapchain buffers map with different strides"
+        Console.writeln "Host: swapchain buffers map with different strides"
         1
     else
 
-    // stride-matched backdrop: gradient + splash centered at natural size
-    let backdrop =
-        match Fidelity.Libc.Memory.malloc (unativeint (stride * h)) with
-        | Some v -> v
-        | None -> 0n
-    let zbuf =
-        match Fidelity.Libc.Memory.malloc (unativeint (w * h * 4)) with
-        | Some v -> v
-        | None -> 0n
-    let staging =
-        match Fidelity.Libc.Memory.malloc (unativeint (stride * h)) with
-        | Some v -> v
-        | None -> 0n
-    if backdrop = 0n || zbuf = 0n || staging = 0n then 1
-    else
-    Compositing.paintDiagonalGradient backdrop w h stride 0 100 178 0 156 171
-    let offX = (w - 460) / 2
-    let offY = (h - 700) / 2
-    Compositing.compositeOver backdrop w h stride splashPix 460 700 offX offY
-
-    // frame-geometry context: window size, glyph origin, zbuf stride, clip
+    // Window-size context, then hand off to the substrate's Fill:
+    // it owns whatever resources its strategy needs and sets the clip rect.
     NativePtr.set ctx 4 (int32 w)
     NativePtr.set ctx 5 (int32 h)
-    NativePtr.set ctx 6 (int32 (offX * 256 + 937))
-    NativePtr.set ctx 7 (int32 (offY * 256 + 5759))
-    NativePtr.set ctx 8 (int32 w)
-    Scene.bounds samples count ctx
-    NativePtr.set ctx 0 (int32 (Fixed.clamp (int (NativePtr.get ctx 0)) 0 w))
-    NativePtr.set ctx 1 (int32 (Fixed.clamp (int (NativePtr.get ctx 1)) 0 h))
-    NativePtr.set ctx 2 (int32 (Fixed.clamp (int (NativePtr.get ctx 2)) 0 w))
-    NativePtr.set ctx 3 (int32 (Fixed.clamp (int (NativePtr.get ctx 3)) 0 h))
+    if Fill.resize samples count ctx (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12)) w h stride <> 0 then 1
+    else
 
     let format = Graphics.getBufferFormat bo0
     let fd0 = Graphics.getBufferFd bo0
@@ -230,52 +194,38 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
     let wlBuf0 = createWlBuffer dmabuf fd0 w h (Graphics.getBufferStride bo0) format
     let wlBuf1 = createWlBuffer dmabuf fd1 w h (Graphics.getBufferStride bo1) format
     if wlBuf0 = 0n || wlBuf1 = 0n then
-        Console.writeln "Animate: failed to create wl_buffers"
+        Console.writeln "Host: failed to create wl_buffers"
         1
     else
     NativePtr.set handles 0 bo0
     NativePtr.set handles 1 bo1
     NativePtr.set handles 2 wlBuf0
     NativePtr.set handles 3 wlBuf1
-    NativePtr.set handles 4 backdrop
-    NativePtr.set handles 5 zbuf
     NativePtr.set handles 6 (nativeint stride)
     NativePtr.set handles 7 (nativeint fd0)
     NativePtr.set handles 8 (nativeint fd1)
-    NativePtr.set handles 10 staging
     0
 
-/// Compose the frame in the cached staging canvas (backdrop restore +
-/// depth clear + glyph draw — GBM maps are write-combined memory where
-/// scattered writes and rim-blend reads are slow), then map the bo and
-/// publish with a single streaming memcpy. Returns 0 on success.
+/// Map the back buffer, let the substrate paint it, unmap.
+/// The shell never touches a pixel.
 let renderInto (bo: nativeint) (strideStorage: nativeint) (mapDataStorage: nativeint)
                (handles: nativeptr<nativeint>)
                (samples: nativeptr<int32>) (count: int)
-               (sprites: nativeptr<nativeint>) (ctx: nativeptr<int32>)
-               (theta12: int) : int =
+               (ctx: nativeptr<int32>) (theta12: int) : int =
     let w = int (NativePtr.get ctx 4)
     let h = int (NativePtr.get ctx 5)
     let stride = int (NativePtr.get handles 6)
-    let backdrop = NativePtr.get handles 4
-    let zbufRaw = NativePtr.get handles 5
-    let staging = NativePtr.get handles 10
-    let lutRaw = NativePtr.get handles 11
-    let _ = Fidelity.Libc.Memory.memcpy (Some staging) (Some backdrop) (unativeint (stride * h))
-    // depth cleared to 0x7F7F7F7F (far) with a byte-pattern memset
-    let _ = Fidelity.Libc.Memory.memset (Some zbufRaw) 127 (unativeint (w * h * 4))
-    Scene.drawGlyph staging stride (NativePtr.ofNativeInt<int32> zbufRaw)
-                    (NativePtr.ofNativeInt<byte> lutRaw)
-                    samples count sprites ctx theta12
     // gbm_bo_map requires *map_data == NULL on entry (Mesa contract)
     NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
     let mapped = Graphics.mapBufferWrite bo w h strideStorage mapDataStorage
     if mapped = 0n then 1
     else
-    let _ = Fidelity.Libc.Memory.memcpy (Some mapped) (Some staging) (unativeint (stride * h))
+    let rc = Fill.frame samples count ctx
+                 (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12))
+                 mapped stride theta12
     let mapData = NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage)
     Graphics.unmapBuffer bo mapData
-    0
+    rc
 
 /// Run the animated splash: responsive window, +-30 deg pivot with a 2 s
 /// traverse per swing (4 s period), compositor-paced at the display rate.
@@ -289,12 +239,12 @@ let run (title: string) : int =
     let globals = NativePtr.ofNativeInt<nativeint> globalsRaw
     let disp = Connection.connect globals
     if disp = 0n then
-        Console.writeln "Animate: failed to connect to display"
+        Console.writeln "Host: failed to connect to display"
         1
     else
     let device = Graphics.createDevice ()
     if device = 0n then
-        Console.writeln "Animate: failed to create graphics device"
+        Console.writeln "Host: failed to create graphics device"
         1
     else
     // shared state: close flag (nativeint slot 0) + configure w/h (int32 2, 3)
@@ -319,11 +269,6 @@ let run (title: string) : int =
     | Some surface ->
 
     // static allocations shared across window sizes
-    let splashPix = Svg.rasterize "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg" 460 700
-    if splashPix = 0n then
-        Console.writeln "Animate: failed to rasterize splash"
-        1
-    else
     let strideStorage =
         match Fidelity.Libc.Memory.malloc (unativeint 4) with
         | Some v -> v
@@ -336,8 +281,8 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 6144) with
         | Some v -> v
         | None -> 0n
-    let spritesRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 8192) with
+    let fillRaw =
+        match Fidelity.Libc.Memory.malloc (unativeint 256) with
         | Some v -> v
         | None -> 0n
     let ctxRaw =
@@ -345,32 +290,31 @@ let run (title: string) : int =
         | Some v -> v
         | None -> 0n
     let handlesRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 96) with
+        match Fidelity.Libc.Memory.malloc (unativeint 128) with
         | Some v -> v
         | None -> 0n
     let frameSlotsRaw =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
-    if strideStorage = 0n || mapDataStorage = 0n || samplesRaw = 0n || spritesRaw = 0n
+    if strideStorage = 0n || mapDataStorage = 0n || samplesRaw = 0n || fillRaw = 0n
        || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n then 1
     else
-    let _ = Fidelity.Libc.Memory.memset (Some spritesRaw) 0 (unativeint 8192)
-    let _ = Fidelity.Libc.Memory.memset (Some handlesRaw) 0 (unativeint 96)
+    let _ = Fidelity.Libc.Memory.memset (Some fillRaw) 0 (unativeint 256)
+    let _ = Fidelity.Libc.Memory.memset (Some handlesRaw) 0 (unativeint 128)
     let samples = NativePtr.ofNativeInt<int32> samplesRaw
-    let sprites = NativePtr.ofNativeInt<nativeint> spritesRaw
     let ctx = NativePtr.ofNativeInt<int32> ctxRaw
     let handles = NativePtr.ofNativeInt<nativeint> handlesRaw
     let frameSlots = NativePtr.ofNativeInt<uint32> frameSlotsRaw
     NativePtr.set frameSlots 0 (uint32 0)
     NativePtr.set frameSlots 1 (uint32 0)
 
-    let count = ClefModel.build samples
+    let count = Model.build samples
     if count = 0 then
-        Console.writeln "Animate: model build failed"
+        Console.writeln "Host: model build failed"
         1
     else
-    Console.write "Animate: model spheres="
+    Console.write "Host: model spheres="
     Console.writeln (Format.int count)
 
     // initial window size from the first configure (0 = no preference)
@@ -379,33 +323,24 @@ let run (title: string) : int =
     let mutable curW = if confW0 > 0 then Fixed.clamp confW0 480 4096 else 750
     let mutable curH = if confH0 > 0 then Fixed.clamp confH0 720 4096 else 900
 
-    let lutRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 32768) with
-        | Some v -> v
-        | None -> 0n
-    if lutRaw = 0n then 1
-    else
-    // intensity banks depend only on bank index, so fill them once
-    Scene.initLightBanks (NativePtr.ofNativeInt<byte> lutRaw)
-    NativePtr.set handles 9 splashPix
-    NativePtr.set handles 11 lutRaw
+    NativePtr.set handles 12 fillRaw
     if rebuildSwapchain device dmabuf samples count
                         strideStorage mapDataStorage ctx handles curW curH <> 0 then 1
     else
-    Console.write "Animate: window "
+    Console.write "Host: window "
     Console.write (Format.int curW)
     Console.write "x"
     Console.writeln (Format.int curH)
 
-    let frameListener = buildWlCallbackListener "HelloWaylandAnimate.frameDone"
+    let frameListener = buildWlCallbackListener "Common.Host.frameDone"
 
     // frame 0: draw, request the frame callback BEFORE the commit
     if renderInto (NativePtr.get handles 0) strideStorage mapDataStorage handles
-                  samples count sprites ctx (Scene.angleAt 1000) <> 0 then 1
+                  samples count ctx (Anim.angleAt 1000) <> 0 then 1
     else
     match wl_surface_frame surface with
     | None ->
-        Console.writeln "Animate: wl_surface_frame failed"
+        Console.writeln "Host: wl_surface_frame failed"
         1
     | Some cb0 ->
     wl_proxy_add_listener (Some cb0) (nativeint &frameListener) (Some frameSlotsRaw) |> ignore
@@ -413,7 +348,7 @@ let run (title: string) : int =
     wl_surface_damage_buffer surface (int32 0) (int32 0) (int32 curW) (int32 curH)
     wl_surface_commit surface
 
-    Console.writeln "Animate: entering frame loop..."
+    Console.writeln "Host: entering frame loop..."
 
     let mutable front = 0
     let mutable resized = false
@@ -446,7 +381,7 @@ let run (title: string) : int =
             let d0 = ms - firstMs
             let elapsed = if d0 < 0 then d0 + 65536 * 65536 else d0
             // 1000 ms phase offset starts the swing at 0 deg moving right
-            let theta = Scene.angleAt (elapsed + 1000)
+            let theta = Anim.angleAt (elapsed + 1000)
 
             // apply any compositor resize before drawing this frame
             let confW = int (NativePtr.get confPtr 2)
@@ -463,7 +398,7 @@ let run (title: string) : int =
                     running <- false
                 else
                     front <- 0
-                    Console.write "Animate: resized to "
+                    Console.write "Host: resized to "
                     Console.write (Format.int curW)
                     Console.write "x"
                     Console.writeln (Format.int curH)
@@ -475,12 +410,12 @@ let run (title: string) : int =
                 let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
                 let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
                 if renderInto bo strideStorage mapDataStorage handles
-                              samples count sprites ctx theta = 0 then
+                              samples count ctx theta = 0 then
                     match wl_surface_frame surface with
                     | Some cb ->
                         wl_proxy_add_listener (Some cb) (nativeint &frameListener) (Some frameSlotsRaw) |> ignore
                     | None ->
-                        Console.writeln "Animate: wl_surface_frame failed"
+                        Console.writeln "Host: wl_surface_frame failed"
                         running <- false
                     if running then
                         wl_surface_attach surface wlBuf (int32 0) (int32 0)
@@ -500,7 +435,7 @@ let run (title: string) : int =
                         if frames % 120 = 0 && dt > 0 then
                             let fps = 120000 / dt
                             fpsMarkMs <- ms
-                            Console.write "Animate: ~"
+                            Console.write "Host: ~"
                             Console.write (Format.int fps)
                             Console.writeln " fps"
                         else
@@ -517,11 +452,10 @@ let run (title: string) : int =
     Fidelity.Libc.Memory.free (Some frameSlotsRaw) |> ignore
     Fidelity.Libc.Memory.free (Some handlesRaw) |> ignore
     Fidelity.Libc.Memory.free (Some ctxRaw) |> ignore
-    Fidelity.Libc.Memory.free (Some spritesRaw) |> ignore
+    Fidelity.Libc.Memory.free (Some fillRaw) |> ignore
     Fidelity.Libc.Memory.free (Some samplesRaw) |> ignore
     Fidelity.Libc.Memory.free (Some strideStorage) |> ignore
     Fidelity.Libc.Memory.free (Some mapDataStorage) |> ignore
-    Svg.freePixmap splashPix
     Fidelity.Libc.Memory.free (Some stateRaw) |> ignore
     Fidelity.Libc.Memory.free (Some globalsRaw) |> ignore
     Connection.disconnect disp

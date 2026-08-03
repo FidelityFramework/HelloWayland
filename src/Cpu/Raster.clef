@@ -1,4 +1,4 @@
-/// Gfx3D.Scene — per-frame transform and draw of the pivoting glyph
+/// Cpu.Raster — per-frame transform and draw of the pivoting glyph
 ///
 /// Rotation about a vertical axis through the glyph center: every sphere
 /// center starts in the z=0 plane, so the rotation collapses to
@@ -19,19 +19,11 @@
 ///   F8      = 66560  perspective distance (260 logo units)
 /// The screen origin of logo (0,0) is dynamic (window-size dependent):
 ///   ox8 = splashOffsetX*256 + 937, oy8 = splashOffsetY*256 + 5759.
-module Gfx3D.Scene
+module Cpu.Raster
 
-open Gfx3D.Fixed
-open Gfx3D.Sprite
-
-/// Pivot angle at elapsed ms: smoothstep-eased triangle wave.
-/// Full travel between extremes takes 2 s (4 s round trip), amplitude
-/// +-30 deg (returns Q12 radians, +-2145).
-let angleAt (elapsedMs: int) : int =
-    let ph = elapsedMs % 4000
-    let t10 = if ph < 2000 then (ph * 1024) / 2000 else ((4000 - ph) * 1024) / 2000
-    let e10 = Fixed.smoothstep10 t10
-    0 - 2145 + (2 * 2145 * e10) / 1024
+open Common.Fixed
+open Common.Geometry
+open Cpu.Sprite
 
 // ─────────────────────────────────────────────────────────────
 // LIGHT — a point source in scene space
@@ -66,12 +58,7 @@ let angleAt (elapsedMs: int) : int =
 /// Pure function of position — no buffers, no state. This is the shape a
 /// device kernel takes, and it is shared verbatim by any substrate.
 let lightAt (px8: int) (py8: int) (pz8: int) : int =
-    let dx = px8 / 64
-    let dy = py8 / 64
-    let dz = pz8 / 64 + 300
-    let d2 = dx * dx + dy * dy + dz * dz
-    let i10 = if d2 > 0 then (235808 * 1024) / d2 else 1024
-    i10 * 4
+    Geometry.lightAt px8 py8 pz8
 
 /// Quantise a Q12 intensity to one of 128 LUT banks spanning 0.30..3.30.
 let lightBank (i12: int) : int =

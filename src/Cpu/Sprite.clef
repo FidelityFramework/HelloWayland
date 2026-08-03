@@ -1,4 +1,4 @@
-/// Gfx3D.Sprite — shaded sphere impostors
+/// Cpu.Sprite — shaded sphere impostors
 ///
 /// A sphere lit by a fixed light looks identical from every rotation,
 /// so one baked sprite serves every sphere of a given screen radius.
@@ -17,9 +17,9 @@
 /// Pixel format: ABGR8888 (R,G,B,A byte order), matching the GBM window
 /// buffer. Byte reads are masked with &&& 255 (Alex byte->int
 /// sign-extension workaround, same as Platform.Display.Compositing).
-module Gfx3D.Sprite
+module Cpu.Sprite
 
-open Gfx3D.Fixed
+open Common.Fixed
 
 // Single light source, upper-left-front. Q12 components of
 // L = normalize(-0.38, -0.42, 0.82) and the Blinn half-vector

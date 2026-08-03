@@ -1,24 +1,25 @@
 /// Entry point for the kernel compilation unit.
 ///
-/// Composer tree-shakes to what is reachable from main, so this forces
-/// the kernel functions into the emitted MLIR. The binary it produces is
-/// never run — the artefact we want is targets/intermediates/10_output.mlir,
-/// which build-kernel.sh wraps in a gpu.module and lowers to gfx1151.
+/// Composer tree-shakes to what is reachable from main, so this anchors
+/// the kernel functions in the emitted MLIR. The GPU backend leg then
+/// takes its own call-graph closure from the kernel entry, so main and
+/// anything else host-side never reaches the device code object.
 module KernelMain
 
-open Console
-open Gfx3D.Fixed
+open Common.Fixed
+open Common.Geometry
 open Gpu.Kernel
 
 [<EntryPoint>]
 let main _ =
     // Reference every function that must survive tree shaking.
-    let a = Kernel.projX8 9830 4096 0 38057
-    let b = Kernel.projY8 9830 9830 0 31359
-    let c = Kernel.projR8 9830 4237 0
-    let d = Kernel.frontZ8 9830 4237 0
-    let e = Kernel.lightAt 9830 9830 0
-    let f = Kernel.hitShade (a + 100) (b + 50) a b c d
-    Console.write "kernel self-test: "
-    Console.writeln (Format.int (a + b + c + d + e + f))
-    0
+    let a = Geometry.projX8 9830 4096 0 38057
+    let b = Geometry.projY8 9830 9830 0 31359
+    let c = Geometry.projR8 9830 4237 0
+    let d = Geometry.frontZ8 9830 4237 0
+    let e = Geometry.lightAt 9830 9830 0
+    let f = Geometry.hitShade (a + 100) (b + 50) a b c d
+    let tbl = Array.zeroCreate<int> 16
+    Array.set tbl 0 4
+    let g = Kernel.kernel 0 tbl 4
+    a + b + c + d + e + f + g

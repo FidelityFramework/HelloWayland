@@ -1,0 +1,118 @@
+/// Fill (CPU) — software rasteriser implementation of the fill contract
+///
+/// One of two files that provide `module Fill`. The fidproj chooses which
+/// one is compiled, so the substrate is a build-time selection and nothing
+/// above this file changes. This build links no ROCm and never touches a
+/// device: every pixel is produced here.
+///
+/// Strategy: bake a shaded sprite per screen radius, then z-test blit the
+/// impostors. Amortising the shading through a sprite cache is what makes
+/// the glyph affordable on one core; see FillGpu.clef for the formulation
+/// the same geometry gets when per-pixel arithmetic is nearly free.
+///
+/// Fill-owned state (the `fill` slot buffer):
+///   [0] backdrop  [1] zbuf  [2] staging  [3] sprite table  [4] LUT banks
+///   [5] splash pixmap
+module Fill
+
+open Console
+open Platform.Display.Svg
+open Platform.Display.Compositing
+open Common.Fixed
+open Cpu.Sprite
+open Cpu.Raster
+
+/// Shown at startup so the running binary names its own substrate.
+let label () : string = "CPU (software rasteriser)"
+
+/// (Re)allocate everything that depends on the window size.
+/// Returns 0 on success.
+let resize (samples: nativeptr<int32>) (count: int)
+           (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+           (w: int) (h: int) (stride: int) : int =
+    let oldBackdrop = NativePtr.get fill 0
+    let oldZbuf = NativePtr.get fill 1
+    let oldStaging = NativePtr.get fill 2
+    if oldBackdrop <> 0n then Fidelity.Libc.Memory.free (Some oldBackdrop) |> ignore else ()
+    if oldZbuf <> 0n then Fidelity.Libc.Memory.free (Some oldZbuf) |> ignore else ()
+    if oldStaging <> 0n then Fidelity.Libc.Memory.free (Some oldStaging) |> ignore else ()
+
+    // The splash art and the sprite/LUT tables are size-independent, so
+    // they are built once and kept across resizes.
+    if NativePtr.get fill 5 = 0n then
+        let pix = Svg.rasterize "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg" 460 700
+        NativePtr.set fill 5 pix
+    else ()
+    if NativePtr.get fill 3 = 0n then
+        let sprites =
+            match Fidelity.Libc.Memory.malloc (unativeint 8192) with
+            | Some v -> v
+            | None -> 0n
+        let _ = Fidelity.Libc.Memory.memset (Some sprites) 0 (unativeint 8192)
+        NativePtr.set fill 3 sprites
+    else ()
+    if NativePtr.get fill 4 = 0n then
+        let lut =
+            match Fidelity.Libc.Memory.malloc (unativeint 32768) with
+            | Some v -> v
+            | None -> 0n
+        if lut <> 0n then Raster.initLightBanks (NativePtr.ofNativeInt<byte> lut) else ()
+        NativePtr.set fill 4 lut
+    else ()
+
+    let backdrop =
+        match Fidelity.Libc.Memory.malloc (unativeint (stride * h)) with
+        | Some v -> v
+        | None -> 0n
+    let zbuf =
+        match Fidelity.Libc.Memory.malloc (unativeint (w * h * 4)) with
+        | Some v -> v
+        | None -> 0n
+    let staging =
+        match Fidelity.Libc.Memory.malloc (unativeint (stride * h)) with
+        | Some v -> v
+        | None -> 0n
+    if backdrop = 0n || zbuf = 0n || staging = 0n then 1
+    else
+    let splashPix = NativePtr.get fill 5
+    Compositing.paintDiagonalGradient backdrop w h stride 0 100 178 0 156 171
+    let offX = (w - 460) / 2
+    let offY = (h - 700) / 2
+    if splashPix <> 0n then
+        Compositing.compositeOver backdrop w h stride splashPix 460 700 offX offY
+    else ()
+    NativePtr.set fill 0 backdrop
+    NativePtr.set fill 1 zbuf
+    NativePtr.set fill 2 staging
+
+    NativePtr.set ctx 6 (int32 (offX * 256 + 937))
+    NativePtr.set ctx 7 (int32 (offY * 256 + 5759))
+    NativePtr.set ctx 8 (int32 w)
+    Raster.bounds samples count ctx
+    NativePtr.set ctx 0 (int32 (Fixed.clamp (int (NativePtr.get ctx 0)) 0 w))
+    NativePtr.set ctx 1 (int32 (Fixed.clamp (int (NativePtr.get ctx 1)) 0 h))
+    NativePtr.set ctx 2 (int32 (Fixed.clamp (int (NativePtr.get ctx 2)) 0 w))
+    NativePtr.set ctx 3 (int32 (Fixed.clamp (int (NativePtr.get ctx 3)) 0 h))
+    0
+
+/// Paint one frame into the mapped buffer. Composition happens in a cached
+/// staging canvas because GBM maps are write-combined memory where
+/// scattered writes are slow; one streaming memcpy publishes the frame.
+let frame (samples: nativeptr<int32>) (count: int)
+          (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+          (mapped: nativeint) (stride: int) (theta12: int) : int =
+    let w = int (NativePtr.get ctx 4)
+    let h = int (NativePtr.get ctx 5)
+    let backdrop = NativePtr.get fill 0
+    let zbuf = NativePtr.get fill 1
+    let staging = NativePtr.get fill 2
+    let sprites = NativePtr.get fill 3
+    let lut = NativePtr.get fill 4
+    let _ = Fidelity.Libc.Memory.memcpy (Some staging) (Some backdrop) (unativeint (stride * h))
+    let _ = Fidelity.Libc.Memory.memset (Some zbuf) 127 (unativeint (w * h * 4))
+    Raster.drawGlyph staging stride (NativePtr.ofNativeInt<int32> zbuf)
+                    (NativePtr.ofNativeInt<byte> lut)
+                    samples count (NativePtr.ofNativeInt<nativeint> sprites)
+                    ctx theta12
+    let _ = Fidelity.Libc.Memory.memcpy (Some mapped) (Some staging) (unativeint (stride * h))
+    0

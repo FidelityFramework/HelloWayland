@@ -1,0 +1,15 @@
+/// GPU-HelloWayland — the device-hosted edition.
+///
+/// Identical window, animation and presentation to CPU-HelloWayland; the
+/// pixels come from a Clef kernel compiled to a gfx1151 code object by
+/// Composer's GPU backend leg, loaded and dispatched at runtime.
+module MainGpu
+
+open Console
+
+[<EntryPoint>]
+let main _ =
+    Console.writeln "GPU-HelloWayland: Clef kernel on the iGPU"
+    Console.write "  fill: "
+    Console.writeln (Fill.label ())
+    Common.Host.run "GPU-HelloWayland"

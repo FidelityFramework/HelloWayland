@@ -1,14 +1,16 @@
-/// HelloWayland — Clef + Fidelity Native Wayland Splash Screen
+/// CPU-HelloWayland — the software-rasterised edition.
 ///
-/// Animated-logo edition: the clef glyph is modeled as 3D geometry
-/// (swept-sphere chain + dot spheres, single-light shading) and pivots
-/// +-20 deg about its vertical axis, re-rendered every compositor frame
-/// via wl_surface::frame callbacks. See docs/animated_logo_3d.md.
-module HelloWayland
+/// Runs entirely on the CPU: no device, no ROCm linkage, no code object.
+/// Identical window, animation and presentation to GPU-HelloWayland,
+/// because both call the same Common.Host shell — the fidproj decides
+/// which Fill implementation answers.
+module Main
 
 open Console
 
 [<EntryPoint>]
 let main _ =
-    Console.writeln "HelloWayland: Fidelity.UI Splash (animated 3D logo)"
-    HelloWaylandAnimate.run "HelloWayland"
+    Console.writeln "CPU-HelloWayland: software rasteriser"
+    Console.write "  fill: "
+    Console.writeln (Fill.label ())
+    Common.Host.run "CPU-HelloWayland"

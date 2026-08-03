@@ -1,0 +1,17 @@
+/// Common.Anim — the pivot curve, shared by both substrates
+///
+/// A smoothstep-eased triangle wave: zero angular velocity at the extremes,
+/// fastest through centre. Both hosts drive their frame from this one
+/// definition, so the two binaries animate identically.
+module Common.Anim
+
+open Common.Fixed
+
+/// Pivot angle at elapsed ms: smoothstep-eased triangle wave.
+/// Full travel between extremes takes 2 s (4 s round trip), amplitude
+/// +-30 deg (returns Q12 radians, +-2145).
+let angleAt (elapsedMs: int) : int =
+    let ph = elapsedMs % 4000
+    let t10 = if ph < 2000 then (ph * 1024) / 2000 else ((4000 - ph) * 1024) / 2000
+    let e10 = Fixed.smoothstep10 t10
+    0 - 2145 + (2 * 2145 * e10) / 1024

@@ -1,7 +1,7 @@
 [package]
 name = "HelloWayland"
 version = "0.2.0"
-description = "Clef + Fidelity — Wayland splash, CPU-rasterised 3D logo"
+description = "Clef + Fidelity — Wayland splash, GPU-rasterised 3D logo"
 authors = ["SpeakEZ Technologies, Inc."]
 license = "MIT"
 
@@ -24,20 +24,21 @@ desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
 # UI framework (widget descriptors, modifiers, rendering bridge)
 ui = { path = "../Fidelity.UI/Fidelity.UI.fidproj" }
 
+# HIP host bindings — device acquisition, module load, dispatch
+rocm = { path = "../Fidelity.Platform/GPU/AMD/RDNA3_5/Fidelity.ROCm.fidproj" }
+
 [build]
 sources = [
     "src/Common/Fixed.clef",
     "src/Common/Geometry.clef",
     "src/Common/Model.clef",
     "src/Common/Anim.clef",
-    "src/Cpu/Sprite.clef",
-    "src/Cpu/Raster.clef",
-    "src/Cpu/Fill.clef",
+    "src/Gpu/Fill.clef",
     "src/Common/Host.clef",
-    "src/Main.clef"
+    "src/MainGpu.clef"
 ]
-output = "CPU-HelloWayland"
+output = "GPU-HelloWayland"
 output_kind = "console"
 
 [link]
-libraries = ["wayland-client", "drm", "gbm", "resvg"]
+libraries = ["wayland-client", "drm", "gbm", "resvg", "amdhip64"]

@@ -1,4 +1,4 @@
-/// Gfx3D.ClefModel — swept-sphere model of the Clef logo glyph
+/// Common.Model — swept-sphere model of the Clef logo glyph
 ///
 /// The bass-clef glyph decomposes into a union of spheres: a chain of
 /// varying-radius spheres swept along the swoop centerline (spiral hook,
@@ -9,9 +9,9 @@
 /// as Q8 logo-viewBox units; Catmull-Rom subdivision at startup expands
 /// them into samples spaced ~0.2 of the local radius so adjacent
 /// impostors fuse into a smooth tube.
-module Gfx3D.ClefModel
+module Common.Model
 
-open Gfx3D.Fixed
+open Common.Fixed
 
 /// Swoop centerline control points, "x,y,r" Q8 triples separated by ';'.
 /// The chain BEGINS at the spiral bulb — the bulb is the stroke at its
