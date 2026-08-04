@@ -33,6 +33,11 @@ open Fidelity.ROCm.Module
 
 let label () : string = "GPU (gfx1151 code object, device-dispatched)"
 
+/// Mirror of the CPU build's selector: this binary links amdhip64 and
+/// dispatches a gfx1151 code object, so it shows the ROCm row and hides the
+/// libc one.
+let plateCss () : string = "#drv-cpu-1,#drv-cpu-2{display:none}"
+
 /// The kernel writes the scanout buffer through its imported DMA-BUF
 /// alias, so the shell must NOT map it: gbm_bo_map/unmap round-trips a
 /// CPU staging copy that would overwrite the device's frame.

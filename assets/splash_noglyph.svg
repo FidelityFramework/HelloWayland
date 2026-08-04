@@ -101,7 +101,7 @@
            style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
            x="54.701233"
            y="168.43047"
-           id="tspan3-4">FreeType</tspan><tspan
+           id="tspan3-4">Trace</tspan><tspan
            sodipodi:role="line"
            style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
            x="54.701233"
@@ -111,7 +111,12 @@
            style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
            x="54.701233"
            y="185.87576"
-           id="tspan5-9">ROCm</tspan></text><text
+           id="drv-cpu-1">libc</tspan><tspan
+           sodipodi:role="line"
+           style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
+           x="54.701233"
+           y="185.87576"
+           id="drv-gpu-1">ROCm</tspan></text><text
          xml:space="preserve"
          style="font-style:italic;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:6.35px;font-family:Z003;-inkscape-font-specification:'Z003 Italic';writing-mode:lr-tb;direction:ltr;fill:#ffffff;fill-opacity:1;stroke:none;stroke-width:1.675;stroke-dasharray:none;stroke-opacity:1"
          x="89.376122"
@@ -136,4 +141,9 @@
            style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
            x="89.376122"
            y="185.87576"
-           id="tspan5-9-5">RDNA3</tspan></text></g></g></svg>
+           id="drv-cpu-2">x86-64</tspan><tspan
+           sodipodi:role="line"
+           style="font-style:normal;font-variant:normal;font-weight:600;font-stretch:normal;font-size:6.35px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Semi-Bold';fill:#ffffff;fill-opacity:1;stroke-width:1.675"
+           x="89.376122"
+           y="185.87576"
+           id="drv-gpu-2">gfx1151</tspan></text></g></g></svg>

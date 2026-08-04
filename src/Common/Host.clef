@@ -223,11 +223,23 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     // screen_px = k12 * logoQ8 / (4096 * 256), so the k12 that makes the model
     // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
     // the two axes to fit rather than crop, and keep a tenth back as margin.
+    // The composition is 460x700 and holds the wordmark at y~355-465 and the
+    // spec panel at y~485-665, so everything above y~350 is the glyph's.
+    //
+    // screen_px = k12 * logoQ8 / (4096 * 256), so the k12 that makes the model
+    // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
+    // the two axes to fit rather than crop, and keep a tenth back as margin.
     let splashX = (w - 460) / 2
     let splashY = (h - 700) / 2
     let slotY = 18
     let slotW = 460
-    let slotH = 330
+    // 314, not the slot's nominal 330. The glyph's visible pixels stop well
+    // clear of the wordmark, but boundsOf pads the model's box by the
+    // perspective sweep (rp8/6 + dxa8/6) and the tracer paints its background
+    // across the whole padded rect — so the band was writing black over the
+    // top 14 rows of type the logo never reached. Measured, not guessed:
+    // the wordmark starts at composition row 358 and was rendering from 372.
+    let slotH = 314
     let ext8x = if gx1 > gx0 then gx1 - gx0 else 1
     let ext8y = if gy1 > gy0 then gy1 - gy0 else 1
     let kx = (slotW * 4096 * 256) / ext8x
@@ -418,13 +430,11 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
-    // One rasterization for the life of the process: the splash is authored
-    // at 460x700 and composited at that natural size, so it does not depend
-    // on the window. Fonts come from the system set (Adwaita Sans, Z003),
-    // which resvg resolves at parse time.
-    // Absolute for now — the binary runs from targets/, so a relative path
-    // misses. Belongs in a resource-path lookup once the chrome is real.
-    let splashPix = Svg.rasterize "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg" 460 700
+    // One rasterization for the life of the process, at the composition's
+    // natural 460x700. Absolute path for now: the binary runs from targets/.
+    let splashPix =
+        Svg.rasterizeStyled "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg"
+                            460 700 (Fill.plateCss ())
     if splashPix = 0n then Console.writeln "Host: splash rasterize failed (continuing without it)" else ()
 
     // 508 points x 4 int32 (x, y, r, k) — the quad stride the model writes.
