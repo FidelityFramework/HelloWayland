@@ -32,14 +32,26 @@ let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) : 
     let mutable minY = 1000000
     let mutable maxX = 0 - 1000000
     let mutable maxY = 0 - 1000000
+    // The smooth union can place the surface up to k/4 outside the hard
+    // union, so every bound has to allow for it or the fillet is cropped at
+    // the glyph's edge. Trace.fillTable widens its tile bboxes by the same
+    // quantity, computed the same way — the two must agree, or a pixel can
+    // be inside the clip rect and outside every tile.
+    let mutable kMax = 0
+    let mutable q = 0
+    while q < count do
+        let kq = int (NativePtr.get samples (q * 4 + 3))
+        if kq > kMax then kMax <- kq else ()
+        q <- q + 1
+    let kPad = kMax / 4
     let mutable k = 0
     while k < count do
-        let x8 = int (NativePtr.get samples (k * 3 + 0))
-        let y8 = int (NativePtr.get samples (k * 3 + 1))
-        let r8 = int (NativePtr.get samples (k * 3 + 2))
+        let x8 = int (NativePtr.get samples (k * 4 + 0))
+        let y8 = int (NativePtr.get samples (k * 4 + 1))
+        let r8 = int (NativePtr.get samples (k * 4 + 2))
         let sx8 = ox8 + (13759 * x8) / 4096
         let sy8 = oy8 + (13759 * y8) / 4096
-        let rp8 = (r8 * 13759) / 4096
+        let rp8 = ((r8 + kPad) * 13759) / 4096
         let ext8 = rp8 + rp8 / 6            // radius * 1.167 perspective margin
         let dxa8 = if sx8 > ax8 then sx8 - ax8 else ax8 - sx8
         let dya8 = if sy8 > ay8 then sy8 - ay8 else ay8 - sy8

@@ -1,14 +1,28 @@
 /// Common.Model — swept-sphere model of the Clef logo glyph
 ///
-/// The bass-clef glyph decomposes into a union of spheres: a chain of
-/// varying-radius spheres swept along the swoop centerline (spiral hook,
-/// over the head ring, down the tapering tail) plus three discrete
-/// spheres (the two dots). The centerline control
-/// points were measured offline from Clef_logo_full.svg (circle fits of
-/// the head boundaries, station table of the tail) and are stored here
-/// as Q8 logo-viewBox units; Catmull-Rom subdivision at startup expands
-/// them into samples spaced ~0.2 of the local radius so adjacent
-/// impostors fuse into a smooth tube.
+/// The glyph is two CSG groups, and the split is authored here rather than
+/// discovered at render time:
+///
+///   ANCHORS  — the spiral bulb and the two dots. Whole spheres, each
+///              carrying its own fillet radius k.
+///   TUBE     — a polyline whose consecutive point pairs are round cones
+///              (tapered capsules) swept along the swoop centerline.
+///
+/// `Trace.pixel` takes the hard minimum *within* each group and the smooth
+/// minimum *between* them. That is the whole of the blending model: a group
+/// is one surface, so there is nothing inside it to fillet, and the only
+/// real crease in the glyph is where the tube emerges from the bulb.
+///
+/// The anchors occupy the first `anchorCount ()` entries. That ordering is
+/// load-bearing — the index boundary is how the tracer tells the groups
+/// apart, at no storage cost.
+///
+/// The centerline control points were measured offline from
+/// Clef_logo_full.svg (circle fits of the head boundaries, station table of
+/// the tail) and are stored as Q8 logo-viewBox units. Subdivision now serves
+/// only the *curve*: a round cone is exactly the swept-sphere envelope
+/// between two points, so samples no longer have to be dense enough to hide
+/// faceting, and the count falls from ~400 to ~100.
 module Common.Model
 
 open Common.Fixed
@@ -22,6 +36,59 @@ let private chainData () : string = "9820,9830,4237;8268,9605,3129;6715,9380,156
 /// Discrete spheres: the two dots ("x,y,r" Q8). Everything else in the
 /// glyph is one continuous swept chain.
 let private discData () : string = "28296,15342,2258;28291,6054,2258"
+
+/// Number of anchor spheres, and hence the index at which the tube polyline
+/// begins. Read by the tracer to split the two CSG groups.
+let anchorCount () : int = 3
+
+/// Fillet radius for the bulb, Q8 logo units — the one authored control
+/// over how the tube meets the bulb.
+///
+/// It is a length, and only a length: the distance from the intersection
+/// over which the smooth minimum acts. Nothing scales it by a radius, a
+/// screen size or a depth, which is what makes it independent of everything
+/// else in the model. `smin` departs from `min` by at most k/4, so this also
+/// fixes exactly how far the blended surface can bulge outside the hard
+/// union — see the k/4 term in Trace.fillTable.
+let filletK () : int = 1800
+
+/// The dots touch nothing, so their junction radius is zero and the minimum
+/// against them stays exact.
+let discK () : int = 0
+
+/// Nudge of the bulb anchor away from chain control point 0, Q8 logo units.
+///
+/// The bulb is an anchor now, not a chain sample, so its centre is an
+/// independent control — which is the point of splitting the groups. Seated
+/// exactly on control point 0 it sits far enough under the arc that the
+/// fillet reaches across a wide band of its surface and it reads as a
+/// swelling in the stroke rather than as a ball. Moving it out along the
+/// bisector of the junction, down and away from the arc overhead, leaves it
+/// reading as a sphere with a neck. Purely a shape decision; nothing in the
+/// field evaluation depends on it.
+let private bulbDX () : int = 0 - 500
+let private bulbDY () : int = 500
+
+/// Where the spiral stops being the bulb and starts being the stroke.
+///
+/// A sample is dropped only when it CONTRIBUTES NOTHING: when its sphere
+/// lies entirely inside the bulb anchor, so the hard minimum can never
+/// select it. That is exact, and it is the weakest defensible test — which
+/// matters, because every sample dropped beyond it is stroke geometry
+/// thrown away.
+///
+/// Two blunter rules were tried and both fail at the extremes of the pivot.
+/// Cutting the chain at a whole control point, and dropping any sample
+/// whose sphere merely covers the bulb's centre, each start the tube
+/// further out than the bulb's surface reaches. At head-on angles the bulb
+/// hides the shortfall; at the far negative swing the spiral is seen from
+/// outside and it reads as an open notch between the stroke and the ball —
+/// background, not shading, so no light position can close it.
+let private containedInBulb (x: int) (y: int) (r: int)
+                            (bx: int) (by: int) (br: int) : int =
+    let dx = x - bx
+    let dy = y - by
+    if Fixed.isqrt (dx * dx + dy * dy) + r <= br then 1 else 0
 
 /// Parse non-negative integers separated by ',' or ';' into out.
 /// Returns the number of values written.
@@ -52,10 +119,21 @@ let catmull (p0: int) (p1: int) (p2: int) (p3: int) (t8: int) : int =
     let c = 0 - p0 + 3 * p1 - 3 * p2 + p3
     (2 * p1 * 256 + a * t8 + b * t2 + c * t3) / 512
 
-/// Build the sphere list: Catmull-Rom-subdivide the control chain with
-/// spacing ~max(0.4, 0.2*r) logo units, then append ball and dots.
-/// samples receives (x8, y8, r8) int32 triples; capacity 512 triples.
-/// Returns the sphere count (0 on allocation failure).
+/// Build the primitive list. samples receives (x8, y8, r8, k8) int32 quads;
+/// capacity 512 quads. Returns the point count (0 on allocation failure).
+///
+/// Emission order is the group split:
+///   [0]                    bulb anchor
+///   [1 .. anchorCount-1]   dot anchors
+///   [anchorCount ..]       tube polyline, consecutive pairs are cones
+///
+/// Spacing is ~0.6 of the local radius. That is five times coarser than the
+/// old ~0.12r and still exact, because the cone between two points *is* the
+/// surface; the only remaining job of subdivision is to follow the
+/// Catmull-Rom curve. Keeping the step below r also guarantees consecutive
+/// endpoint spheres overlap, which is what lets the tracer's ray-sphere
+/// first pass stand in for a ray-cone test without ever missing a ray that
+/// clips only the conical flank.
 let build (samples: nativeptr<int32>) : int =
     let ctrlRaw =
         match Fidelity.Libc.Memory.malloc (unativeint 1024) with
@@ -64,9 +142,42 @@ let build (samples: nativeptr<int32>) : int =
     if ctrlRaw = 0n then 0
     else
     let ctrl = NativePtr.ofNativeInt<int32> ctrlRaw
+    // Read the dots out first and hold them in scalars: the control buffer
+    // is reused for the chain, and the anchors must be emitted before it.
+    let nDisc = parseInts (discData ()) ctrl
+    let nDot = nDisc / 3
+    let d0x = int (NativePtr.get ctrl 0)
+    let d0y = int (NativePtr.get ctrl 1)
+    let d0r = int (NativePtr.get ctrl 2)
+    let d1x = if nDot > 1 then int (NativePtr.get ctrl 3) else 0
+    let d1y = if nDot > 1 then int (NativePtr.get ctrl 4) else 0
+    let d1r = if nDot > 1 then int (NativePtr.get ctrl 5) else 0
+
     let nVals = parseInts (chainData ()) ctrl
     let nCtrl = nVals / 3
     let mutable count = 0
+
+    // Anchor 0: the bulb. Seeded from chain control point 0 — the stroke at
+    // its widest — then nudged out along the junction bisector. It is a whole
+    // sphere here, not a chain sample, and it owns the only non-zero fillet
+    // radius in the model.
+    let bulbX = int (NativePtr.get ctrl 0) + bulbDX ()
+    let bulbY = int (NativePtr.get ctrl 1) + bulbDY ()
+    let bulbR = int (NativePtr.get ctrl 2)
+    NativePtr.set samples 0 (int32 bulbX)
+    NativePtr.set samples 1 (int32 bulbY)
+    NativePtr.set samples 2 (NativePtr.get ctrl 2)
+    NativePtr.set samples 3 (int32 (filletK ()))
+    NativePtr.set samples 4 (int32 d0x)
+    NativePtr.set samples 5 (int32 d0y)
+    NativePtr.set samples 6 (int32 d0r)
+    NativePtr.set samples 7 (int32 (discK ()))
+    NativePtr.set samples 8 (int32 d1x)
+    NativePtr.set samples 9 (int32 d1y)
+    NativePtr.set samples 10 (int32 d1r)
+    NativePtr.set samples 11 (int32 (discK ()))
+    count <- anchorCount ()
+
     let mutable i = 0
     while i < nCtrl - 1 do
         let i0 = if i > 0 then i - 1 else 0
@@ -84,18 +195,28 @@ let build (samples: nativeptr<int32>) : int =
         let dx = p2x - p1x
         let dy = p2y - p1y
         let seg = Fixed.isqrt (dx * dx + dy * dy)
-        let rAvg = (p1r + p2r) / 2
-        let stepA = (rAvg * 31) / 256          // ~0.12 * r in Q8
+        // The SMALLER of the two radii, not the mean. The spacing guarantee
+        // the tracer relies on — consecutive endpoint spheres overlap, so a
+        // ray-sphere first pass never misses a ray that clips only the
+        // conical flank — has to hold at the thin end of a tapering span.
+        // Averaging let two spans near the r=179 waist space their samples
+        // wider than the local radius.
+        let rMin = if p1r < p2r then p1r else p2r
+        let stepA = (rMin * 154) / 256         // ~0.60 * r in Q8
         let step = if stepA > 77 then stepA else 77
         let mutable n = seg / step + 1
         if n > 40 then n <- 40 else ()
         let mutable j = 0
         while j < n do
-            if count < 508 then
-                let t8 = (j * 256) / n
-                NativePtr.set samples (count * 3 + 0) (int32 (catmull p0x p1x p2x p3x t8))
-                NativePtr.set samples (count * 3 + 1) (int32 (catmull p0y p1y p2y p3y t8))
-                NativePtr.set samples (count * 3 + 2) (int32 (Fixed.lerp8 p1r p2r t8))
+            let t8 = (j * 256) / n
+            let sx = catmull p0x p1x p2x p3x t8
+            let sy = catmull p0y p1y p2y p3y t8
+            let sr = Fixed.lerp8 p1r p2r t8
+            if count < 508 && containedInBulb sx sy sr bulbX bulbY bulbR = 0 then
+                NativePtr.set samples (count * 4 + 0) (int32 sx)
+                NativePtr.set samples (count * 4 + 1) (int32 sy)
+                NativePtr.set samples (count * 4 + 2) (int32 sr)
+                NativePtr.set samples (count * 4 + 3) (int32 0)
                 count <- count + 1
             else
                 ()
@@ -103,23 +224,12 @@ let build (samples: nativeptr<int32>) : int =
         i <- i + 1
     // final control point closes the chain at the tail tip
     if nCtrl > 0 && count < 508 then
-        NativePtr.set samples (count * 3 + 0) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 0))
-        NativePtr.set samples (count * 3 + 1) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 1))
-        NativePtr.set samples (count * 3 + 2) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 2))
+        NativePtr.set samples (count * 4 + 0) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 0))
+        NativePtr.set samples (count * 4 + 1) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 1))
+        NativePtr.set samples (count * 4 + 2) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 2))
+        NativePtr.set samples (count * 4 + 3) (int32 0)
         count <- count + 1
     else
         ()
-    // ball and dots
-    let nDisc = parseInts (discData ()) ctrl
-    let mutable d = 0
-    while d < nDisc / 3 do
-        if count < 508 then
-            NativePtr.set samples (count * 3 + 0) (NativePtr.get ctrl (d * 3 + 0))
-            NativePtr.set samples (count * 3 + 1) (NativePtr.get ctrl (d * 3 + 1))
-            NativePtr.set samples (count * 3 + 2) (NativePtr.get ctrl (d * 3 + 2))
-            count <- count + 1
-        else
-            ()
-        d <- d + 1
     Fidelity.Libc.Memory.free (Some ctrlRaw)
     count

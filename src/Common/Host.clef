@@ -189,10 +189,33 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
     NativePtr.set ctx 5 (int32 h)
     NativePtr.set ctx 10 (int32 (Graphics.getBufferFd bo0))
     NativePtr.set ctx 11 (int32 (Graphics.getBufferFd bo1))
-    let offX = (w - 460) / 2
-    let offY = (h - 700) / 2
-    NativePtr.set ctx 6 (int32 (offX * 256 + 937))
-    NativePtr.set ctx 7 (int32 (offY * 256 + 5759))
+    // Centre the glyph from the model's own extent. This used to be a
+    // literal 460x700 pixel box with two Q8 nudges, measured off one
+    // particular build — so it drifted the moment the model changed, and
+    // the model has since changed shape twice (the tube became cone
+    // endpoints, and the samples fully contained in the bulb were dropped).
+    // Deriving the box means the glyph stays centred whatever the chain
+    // does next.
+    let mutable gx0 = 2000000000
+    let mutable gx1 = 0 - 2000000000
+    let mutable gy0 = 2000000000
+    let mutable gy1 = 0 - 2000000000
+    let mutable m = 0
+    while m < count do
+        let mx8 = int (NativePtr.get samples (m * 4 + 0))
+        let my8 = int (NativePtr.get samples (m * 4 + 1))
+        let mr8 = int (NativePtr.get samples (m * 4 + 2))
+        if mx8 - mr8 < gx0 then gx0 <- mx8 - mr8 else ()
+        if mx8 + mr8 > gx1 then gx1 <- mx8 + mr8 else ()
+        if my8 - mr8 < gy0 then gy0 <- my8 - mr8 else ()
+        if my8 + mr8 > gy1 then gy1 <- my8 + mr8 else ()
+        m <- m + 1
+    // Logo Q8 scales to screen Q8 by 13759/4096. Solve for the origin that
+    // puts the glyph's projected box in the middle of the window.
+    let gw8 = (13759 * (gx1 - gx0)) / 4096
+    let gh8 = (13759 * (gy1 - gy0)) / 4096
+    NativePtr.set ctx 6 (int32 ((w * 256 - gw8) / 2 - (13759 * gx0) / 4096))
+    NativePtr.set ctx 7 (int32 ((h * 256 - gh8) / 2 - (13759 * gy0) / 4096))
     NativePtr.set ctx 8 (int32 w)
     // Conservative glyph bound: the tracer's sweep rect and the damage
     // region the shell reports to the compositor are the same rectangle.
@@ -255,7 +278,7 @@ let renderInto (bo: nativeint) (strideStorage: nativeint) (mapDataStorage: nativ
                     (Fixed.cosSmall12 theta12) (Fixed.sinSmall12 theta12) w
                     (int (NativePtr.get ctx 0)) (int (NativePtr.get ctx 1))
                     (int (NativePtr.get ctx 2)) (int (NativePtr.get ctx 3))
-                    bandY0 bandRows
+                    bandY0 bandRows (Model.anchorCount ())
     if Fill.wantsCpuMapping () = 0 then
         // The substrate addresses the buffer itself; mapping it here would
         // stage a CPU copy over the top of the device's own writes.
@@ -325,8 +348,9 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
+    // 508 points x 4 int32 (x, y, r, k) — the quad stride the model writes.
     let samplesRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 6144) with
+        match Fidelity.Libc.Memory.malloc (unativeint 8192) with
         | Some v -> v
         | None -> 0n
     let fillRaw =

@@ -32,6 +32,15 @@ design with a fifty-year backstory, summarized in [lineage.md](lineage.md).
   mirror, Catmull-Rom chain subdivision, and the sphere shading kernel.
   Documentation only — this project contains no Python and none of it is
   part of the build.
+- **[from-impostors-to-envelopes.md](from-impostors-to-envelopes.md)** —
+  the sequel, and the one that qualifies the rest of this folder. The
+  port carried the prototype's *model* across intact, and that model was
+  a discretisation (a few hundred sphere impostors) rather than a
+  description. Replacing it with the exact swept-sphere envelope and a
+  single analytic distance field made the surface correct, cut the
+  primitive count by 3x, and deleted an entire screen-space pass — plus
+  what fixed-point representation still charges you for even when the
+  algebra is exact.
 
 ## The two-strata point
 

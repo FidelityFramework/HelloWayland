@@ -11,24 +11,73 @@
 ///
 /// The split between `fillTable` and `pixel` is the coeffect boundary.
 /// Anything a pixel would otherwise recompute identically for every pixel
-/// — the projection of a sphere, the reciprocal of the gradient span, which
-/// spheres can possibly cover a given tile — is *observed once* into the
-/// table and merely read in the inner loop. That is what makes the same
-/// gather affordable on one CPU core and on a whole GPU.
+/// — the rotation of a primitive, which primitives can possibly cover a
+/// given tile — is *observed once* into the table and merely read in the
+/// inner loop. That is what makes the same gather affordable on one CPU
+/// core and on a whole GPU.
+///
+/// ---------------------------------------------------------------------
+/// THE SURFACE MODEL
+///
+/// The glyph is a signed distance field evaluated in true 3D, and the
+/// visible surface is its zero set. There are two CSG groups, split in
+/// Model.clef and told apart here by index alone:
+///
+///   f(p) = smin( min over tube cones, min over anchor spheres, k )
+///
+/// Hard minimum *within* a group, smooth minimum *between* groups. A group
+/// is one surface, so there is nothing inside it to fillet; the only real
+/// crease in the glyph is where the tube emerges from the bulb, and that is
+/// exactly where — and only where — smin acts.
+///
+/// This replaces a screen-space pass that averaged the normals of nearby
+/// spheres inside a depth band. That average had no geometric referent: the
+/// contributing normals were each taken at a *different* point in space, so
+/// no surface had the normal it produced, and no amount of band tuning
+/// could converge. Here every field and every gradient is evaluated at one
+/// point p, which is what makes the result a surface rather than a blend.
+///
+/// Two consequences worth stating, because both delete code rather than
+/// adding it:
+///
+///   The tube is round cones (tapered capsules) between consecutive
+///   polyline points, not a dense chain of spheres. A cone *is* the
+///   swept-sphere envelope, so its normal is continuous along the sweep.
+///   Overlapping spheres are only C0: the normal jumps by the half-angle
+///   between neighbours wherever the nearest one changes, and a ^72
+///   specular lobe magnifies that into visible beading along the swoop.
+///   Denser sampling shortens the beads without ever removing them.
+///
+///   The gradient is free. For f = smin(a, b, k), the partials collapse to
+///   df/da = h and df/db = 1 - h, where h is smin's own interpolation
+///   parameter. So grad f = h*ga + (1-h)*gb, and ga, gb are the unit
+///   vectors from the two *winning* primitives — both already found. No
+///   finite differences, no extra field evaluations.
+///
+/// Marching is not needed. Pass 1 solves ray-vs-sphere analytically for a
+/// start point on the hard union, and two Newton steps along the ray move
+/// it onto the smooth union. Measured against a 160-step sphere trace, two
+/// steps differ on 3.1% of covered pixels by more than 8/255, and are
+/// visually indistinguishable.
 ///
 /// Table layout (int, Q8 unless noted):
 ///   [0]  stride in pixels     [1]  window height
-///   [2]  sphere count         [3]  window width
+///   [2]  point count          [3]  window width
 ///   [4]  rx0  [5] ry0  [6] rx1  [7] ry1     glyph rect (screen px)
 ///   [8]  tilesX               [9]  tilesY
-///   [10] 65536 / tileSize     [11] sphere record base
+///   [10] 65536 / tileSize     [11] primitive record base
 ///   [12] tile offset base     [13] tile item base
-///   [14] gradient reciprocal  [15] used length
+///   [14] unused               [15] used length
 ///   [16] band first row       [17] band row count
-///   [18] 2^38 / stride        [19] spare
-///   sphere records: 6 ints each — cx8 cy8 rp8 z8 lx8 ly8
+///   [18] 2^38 / stride        [19] anchor count
+///   [20] origin x8            [21] origin y8
+///   [22] max k / 4            [23] segment count
+///   primitive records: 8 ints each
+///       sx8 sy8 rp8   screen centre and radius — tile binning only
+///       cx8 cy8 cz8   ROTATED, UNPROJECTED logo centre — the 3D field
+///       r8  k8        logo radius, fillet radius
 ///   tile offsets:   tilesX*tilesY + 1 prefix sums into the item array
-///   tile items:     sphere indices, grouped by tile
+///   tile items:     segment indices, grouped by tile
 module Common.Trace
 
 open Common.Fixed
@@ -38,22 +87,45 @@ open Common.Geometry
 /// at any window size, and the tile arrays can be sized once.
 let private maxTiles () : int = 4096
 
-/// How many ints the shared table needs for a model of `count` spheres.
-/// One definition, so the host and the device allocator cannot disagree.
-let tableSize (count: int) : int = 20 + count * 6 + (maxTiles () + 1) + count * 64
+/// Camera and glyph axes in Q8 logo units. The eye sits at (PX, PY, -F)
+/// looking down +z, and the projection plane is z = 0 — which is exactly
+/// the perspective the projX8/projY8 divide already implements, so screen
+/// space and this ray geometry describe the same camera.
+let private camF () : int = 66560
+let private camX () : int = 17423
+let private camY () : int = 17152
 
-/// Pack the frame description the tracer reads: project every sphere once,
-/// then bucket the projections into screen tiles. One definition, so the
-/// two substrates cannot disagree about what a frame is.
+/// How many ints the shared table needs for a model of `count` points.
+/// One definition, so the host and the device allocator cannot disagree.
+let tableSize (count: int) : int = 24 + count * 8 + (maxTiles () + 1) + count * 64
+
+/// Pack the frame description the tracer reads: rotate every primitive
+/// once, then bucket the tube segments into screen tiles. One definition,
+/// so the two substrates cannot disagree about what a frame is.
 let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
               (stridePx: int) (h: int) (ox8: int) (oy8: int)
               (ct: int) (st: int) (w: int)
               (rx0: int) (ry0: int) (rx1: int) (ry1: int)
-              (bandY0: int) (bandRows: int) : unit =
-    let sphereBase = 20
-    let offsetBase = sphereBase + count * 6
+              (bandY0: int) (bandRows: int) (nAnchor: int) : unit =
+    let recBase = 24
+    let offsetBase = recBase + count * 8
     let itemBase = offsetBase + maxTiles () + 1
     let itemCap = count * 64
+    let nSeg = if count > nAnchor then count - nAnchor - 1 else 0
+
+    // The smooth minimum departs from the hard minimum by at most k/4, so
+    // the blended surface can sit that far outside the union and nowhere
+    // further. Every bound below is widened by exactly that much: the tile
+    // bbox, so a pixel in the fillet is binned, and the pass-1 ray-sphere
+    // radius, so it gets a start point. It is a derived quantity, not a
+    // margin — there is nothing here to tune.
+    let mutable kMax = 0
+    let mutable q = 0
+    while q < count do
+        let kq = int (NativePtr.get samples (q * 4 + 3))
+        if kq > kMax then kMax <- kq else ()
+        q <- q + 1
+    let kPad = kMax / 4
 
     // Tiles are a power of two wide so the pixel-side divide is a multiply.
     let rw = rx1 - rx0
@@ -65,83 +137,107 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     let tilesY = rh / ts + 1
     let nTiles = tilesX * tilesY
 
-    // Project each sphere once. This is the work the inner loop used to
-    // repeat per pixel: six functions, ~18 divides, all pixel-invariant.
+    // Rotate each primitive once. Note the 3D centre is rotated but NOT
+    // projected: perspective is in the ray, so applying it here as well
+    // would divide the geometry twice. Only the screen triple carries the
+    // projection, and it is used for nothing but tile binning.
     let mutable k = 0
     while k < count do
-        let sx = int (NativePtr.get samples (k * 3 + 0))
-        let sy = int (NativePtr.get samples (k * 3 + 1))
-        let sr = int (NativePtr.get samples (k * 3 + 2))
-        let b = sphereBase + k * 6
+        let sx = int (NativePtr.get samples (k * 4 + 0))
+        let sy = int (NativePtr.get samples (k * 4 + 1))
+        let sr = int (NativePtr.get samples (k * 4 + 2))
+        let sk = int (NativePtr.get samples (k * 4 + 3))
+        let b = recBase + k * 8
+        let rx = sx - camX ()
         Array.set table b (projX8 sx ct st ox8)
         Array.set table (b + 1) (projY8 sx sy st oy8)
-        Array.set table (b + 2) (projR8 sx sr st)
-        Array.set table (b + 3) (frontZ8 sx sr st)
-        Array.set table (b + 4) (logoX8 sx ct st)
-        Array.set table (b + 5) (logoY8 sx sy st)
+        Array.set table (b + 2) (projR8 sx (sr + kPad) st)
+        Array.set table (b + 3) (camX () + (rx * ct) / 4096)
+        Array.set table (b + 4) sy
+        Array.set table (b + 5) ((rx * st) / 4096)
+        Array.set table (b + 6) sr
+        Array.set table (b + 7) sk
         k <- k + 1
 
-    // Pass 1: how many spheres land in each tile. Counts are written one
+    // Pass 1: how many segments land in each tile. Counts are written one
     // slot high so the prefix sum below turns them into start offsets in
-    // place, without a second array.
+    // place, without a second array. A segment's screen extent is the union
+    // of its two endpoint discs — the cone between them lies inside their
+    // convex hull, so that bound is sound.
     let mutable t = 0
     while t <= nTiles do
         Array.set table (offsetBase + t) 0
         t <- t + 1
-    k <- 0
-    while k < count do
-        let b = sphereBase + k * 6
-        let cx = Array.get table b / 256
-        let cy = Array.get table (b + 1) / 256
-        let rp = Array.get table (b + 2) / 256 + 1
-        let tx0 = Fixed.clamp ((cx - rp - rx0) / ts) 0 (tilesX - 1)
-        let tx1 = Fixed.clamp ((cx + rp - rx0) / ts) 0 (tilesX - 1)
-        let ty0 = Fixed.clamp ((cy - rp - ry0) / ts) 0 (tilesY - 1)
-        let ty1 = Fixed.clamp ((cy + rp - ry0) / ts) 0 (tilesY - 1)
+    let mutable s = 0
+    while s < nSeg do
+        let ba = recBase + (nAnchor + s) * 8
+        let bb = ba + 8
+        let ax = Array.get table ba / 256
+        let ay = Array.get table (ba + 1) / 256
+        let ar = Array.get table (ba + 2) / 256 + 1
+        let bx = Array.get table bb / 256
+        let by = Array.get table (bb + 1) / 256
+        let br = Array.get table (bb + 2) / 256 + 1
+        let lo0 = if ax - ar < bx - br then ax - ar else bx - br
+        let hi0 = if ax + ar > bx + br then ax + ar else bx + br
+        let lo1 = if ay - ar < by - br then ay - ar else by - br
+        let hi1 = if ay + ar > by + br then ay + ar else by + br
+        let tx0 = Fixed.clamp ((lo0 - rx0) / ts) 0 (tilesX - 1)
+        let tx1 = Fixed.clamp ((hi0 - rx0) / ts) 0 (tilesX - 1)
+        let ty0 = Fixed.clamp ((lo1 - ry0) / ts) 0 (tilesY - 1)
+        let ty1 = Fixed.clamp ((hi1 - ry0) / ts) 0 (tilesY - 1)
         let mutable ty = ty0
         while ty <= ty1 do
             let mutable tx = tx0
             while tx <= tx1 do
-                let s = offsetBase + ty * tilesX + tx + 1
-                Array.set table s (Array.get table s + 1)
+                let sl = offsetBase + ty * tilesX + tx + 1
+                Array.set table sl (Array.get table sl + 1)
                 tx <- tx + 1
             ty <- ty + 1
-        k <- k + 1
+        s <- s + 1
 
     // Prefix sum: slot[t] becomes tile t's start, slot[t+1] its end.
     // Saturating, so a pathological model truncates rather than overruns.
     t <- 1
     while t <= nTiles do
-        let s = offsetBase + t
-        let v = Array.get table (offsetBase + t - 1) + Array.get table s
-        Array.set table s (if v > itemCap then itemCap else v)
+        let sl = offsetBase + t
+        let v = Array.get table (offsetBase + t - 1) + Array.get table sl
+        Array.set table sl (if v > itemCap then itemCap else v)
         t <- t + 1
     let used = Array.get table (offsetBase + nTiles)
 
     // Pass 2: scatter, using each start offset as a cursor.
-    k <- 0
-    while k < count do
-        let b = sphereBase + k * 6
-        let cx = Array.get table b / 256
-        let cy = Array.get table (b + 1) / 256
-        let rp = Array.get table (b + 2) / 256 + 1
-        let tx0 = Fixed.clamp ((cx - rp - rx0) / ts) 0 (tilesX - 1)
-        let tx1 = Fixed.clamp ((cx + rp - rx0) / ts) 0 (tilesX - 1)
-        let ty0 = Fixed.clamp ((cy - rp - ry0) / ts) 0 (tilesY - 1)
-        let ty1 = Fixed.clamp ((cy + rp - ry0) / ts) 0 (tilesY - 1)
+    s <- 0
+    while s < nSeg do
+        let ba = recBase + (nAnchor + s) * 8
+        let bb = ba + 8
+        let ax = Array.get table ba / 256
+        let ay = Array.get table (ba + 1) / 256
+        let ar = Array.get table (ba + 2) / 256 + 1
+        let bx = Array.get table bb / 256
+        let by = Array.get table (bb + 1) / 256
+        let br = Array.get table (bb + 2) / 256 + 1
+        let lo0 = if ax - ar < bx - br then ax - ar else bx - br
+        let hi0 = if ax + ar > bx + br then ax + ar else bx + br
+        let lo1 = if ay - ar < by - br then ay - ar else by - br
+        let hi1 = if ay + ar > by + br then ay + ar else by + br
+        let tx0 = Fixed.clamp ((lo0 - rx0) / ts) 0 (tilesX - 1)
+        let tx1 = Fixed.clamp ((hi0 - rx0) / ts) 0 (tilesX - 1)
+        let ty0 = Fixed.clamp ((lo1 - ry0) / ts) 0 (tilesY - 1)
+        let ty1 = Fixed.clamp ((hi1 - ry0) / ts) 0 (tilesY - 1)
         let mutable ty = ty0
         while ty <= ty1 do
             let mutable tx = tx0
             while tx <= tx1 do
-                let s = offsetBase + ty * tilesX + tx
-                let cur = Array.get table s
-                if cur < Array.get table (s + 1) then
-                    Array.set table (itemBase + cur) k
-                    Array.set table s (cur + 1)
+                let sl = offsetBase + ty * tilesX + tx
+                let cur = Array.get table sl
+                if cur < Array.get table (sl + 1) then
+                    Array.set table (itemBase + cur) s
+                    Array.set table sl (cur + 1)
                 else ()
                 tx <- tx + 1
             ty <- ty + 1
-        k <- k + 1
+        s <- s + 1
 
     // Each cursor now holds its tile's end. Shifting the array up one slot
     // restores starts, because tile t's start is tile t-1's end.
@@ -153,31 +249,38 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     Array.set table (offsetBase + nTiles) used
 
     // Order each tile front-to-back. Sorting here — once per tile per frame
-    // — is what lets the depth bound in `pixel` reject almost every
-    // candidate on the first compare, on either substrate.
+    // — is what lets the depth bound in pass 1 reject candidates before any
+    // square root happens, on either substrate. The key is the nearest
+    // point of the segment in z.
     t <- 0
     while t < nTiles do
-        let s = Array.get table (offsetBase + t)
-        let e = Array.get table (offsetBase + t + 1)
-        let mutable p = s + 1
-        while p < e do
+        let s0 = Array.get table (offsetBase + t)
+        let e0 = Array.get table (offsetBase + t + 1)
+        let mutable p = s0 + 1
+        while p < e0 do
             let v = Array.get table (itemBase + p)
-            let vz = Array.get table (sphereBase + v * 6 + 3)
-            let mutable q = p
+            let vb = recBase + (nAnchor + v) * 8
+            let vz0 = Array.get table (vb + 5) - Array.get table (vb + 6)
+            let vz1 = Array.get table (vb + 13) - Array.get table (vb + 14)
+            let vz = if vz0 < vz1 then vz0 else vz1
+            let mutable qq = p
             let mutable sinking = 1
             while sinking = 1 do
-                if q > s then
-                    let prevIdx = Array.get table (itemBase + q - 1)
-                    if Array.get table (sphereBase + prevIdx * 6 + 3) > vz then
-                        Array.set table (itemBase + q) prevIdx
-                        q <- q - 1
+                if qq > s0 then
+                    let pv = Array.get table (itemBase + qq - 1)
+                    let pb = recBase + (nAnchor + pv) * 8
+                    let pz0 = Array.get table (pb + 5) - Array.get table (pb + 6)
+                    let pz1 = Array.get table (pb + 13) - Array.get table (pb + 14)
+                    let pz = if pz0 < pz1 then pz0 else pz1
+                    if pz > vz then
+                        Array.set table (itemBase + qq) pv
+                        qq <- qq - 1
                     else sinking <- 0
                 else sinking <- 0
-            Array.set table (itemBase + q) v
+            Array.set table (itemBase + qq) v
             p <- p + 1
         t <- t + 1
 
-    let total = w + h - 2
     Array.set table 0 stridePx
     Array.set table 1 h
     Array.set table 2 count
@@ -189,24 +292,27 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     Array.set table 8 tilesX
     Array.set table 9 tilesY
     Array.set table 10 (65536 / ts)
-    Array.set table 11 sphereBase
+    Array.set table 11 recBase
     Array.set table 12 offsetBase
     Array.set table 13 itemBase
-    Array.set table 14 (if total > 0 then (255 * 65536) / total else 0)
+    Array.set table 14 0
     Array.set table 15 (itemBase + used)
     Array.set table 16 bandY0
     Array.set table 17 bandRows
     // Row and column from one multiply instead of two divides: 2^38 is
     // exact for any stride and index this shell can produce.
     Array.set table 18 ((524288 * 524288) / stridePx + 1)
-    Array.set table 19 0
+    Array.set table 19 nAnchor
+    Array.set table 20 ox8
+    Array.set table 21 oy8
+    Array.set table 22 kPad
+    Array.set table 23 nSeg
 
 /// Shade one pixel of the frame the table describes.
 let pixel (i: int) (data: int array) (n: int) : int =
     if i >= n then 0
     else
     let stridePx = Array.get data 0
-    let h = Array.get data 1
     let w = Array.get data 3
     // The domain is a band of rows, not the whole window: outside the band
     // the frame is unchanged from the full paint the shell did when the
@@ -217,9 +323,7 @@ let pixel (i: int) (data: int array) (n: int) : int =
     // Flat black backdrop. The glyph is matte and lit from one side, so its
     // silhouette falls to near-black at every grazing edge; over a blue
     // gradient that rim read as a dirty fringe, and over black it reads as
-    // form. Being a constant it also costs nothing — the gradient it
-    // replaced spent a multiply and three divides on every pixel of the
-    // band, which is the most expensive thing the background could be.
+    // form. Being a constant it also costs nothing.
     let bg = 16777216 * 255
     if gx >= w then bg
     else
@@ -230,7 +334,7 @@ let pixel (i: int) (data: int array) (n: int) : int =
     let inside = if gx >= rx0 then (if gx < rx1 then (if gy >= ry0 then (if gy < ry1 then 1 else 0) else 0) else 0) else 0
     if inside = 0 then bg
     else
-    // Which tile this pixel belongs to, and hence which spheres can
+    // Which tile this pixel belongs to, and hence which segments can
     // possibly cover it. Everything else is already excluded.
     let recip = Array.get data 10
     let tx = ((gx - rx0) * recip) / 65536
@@ -241,108 +345,255 @@ let pixel (i: int) (data: int array) (n: int) : int =
     let last = Array.get data (ti + 1)
     let ib = Array.get data 13
     let sb = Array.get data 11
-    let pxQ8 = gx * 256
-    let pyQ8 = gy * 256
-    let mutable bestHard = 0    // depth of the nearest surface at this pixel
-    let mutable bestRec = 0
+    let nAnchor = Array.get data 19
+    let kPad = Array.get data 22
+
+    // The view ray. Undo the logo-unit -> screen scale to land on the
+    // projection plane z = 0, then aim from the eye through that point.
+    // Perspective is entirely in this construction, which is why the table
+    // stores unprojected 3D centres.
+    let lx8 = ((gx * 256 - Array.get data 20) * 4096) / 13759
+    let ly8 = ((gy * 256 - Array.get data 21) * 4096) / 13759
+    let ex = camX ()
+    let ey = camY ()
+    let ez = 0 - camF ()
+    let rdx = lx8 - ex
+    let rdy = ly8 - ey
+    let rdz = camF ()
+    // Q20, not the Q12 used everywhere else. The eye sits 66560 Q8 units off
+    // the projection plane, so a direction quantised to 1/4096 carries a
+    // 16-unit error into the ray-sphere discriminant's linear term. Near a
+    // silhouette the discriminant is itself only ~1e6, so that error flips
+    // the hit test between neighbouring rays and shreds the edge into a
+    // stipple about ten pixels deep. Sixteen bits of direction is not a
+    // refinement here, it is the difference between a silhouette and a
+    // dither. The products stay well inside int64: |oc| * 2^20 * 3 ~ 2.7e11.
+    let rl = Fixed.isqrt (rdx * rdx + rdy * rdy + rdz * rdz)
+    let dux = if rl > 0 then (rdx * 1048576) / rl else 0
+    let duy = if rl > 0 then (rdy * 1048576) / rl else 0
+    let duz = if rl > 0 then (rdz * 1048576) / rl else 1048576
+
+    // Pass 1: nearest analytic ray-sphere hit, over the anchors and over
+    // both endpoints of every segment in this tile. The endpoints overlap
+    // by construction (Model spaces them below the local radius), so a ray
+    // that clips only the conical flank still hits one of them — which is
+    // what lets a ray-sphere test stand in for a ray-cone test here.
+    let mutable tBest = 0
     let mutable found = 0
-    let mutable j = first
-    while j < last do
-        let b = sb + (Array.get data (ib + j)) * 6
-        // The front of a sphere bounds the depth of every point on it, so a
-        // candidate that starts behind cannot win — one compare rejects it
-        // before any square root happens.
-        let bound = Array.get data (b + 3) + 1048576
-        let skip = if found = 1 then (if bound >= bestHard then 1 else 0) else 0
-        let dep =
-            if skip = 1 then 0
-            else hitDepth pxQ8 pyQ8
-                          (Array.get data b) (Array.get data (b + 1))
-                          (Array.get data (b + 2)) (Array.get data (b + 3))
-        let hit = if dep <> 0 then 1 else 0
-        let nearer = if found = 0 then 1 else (if dep < bestHard then 1 else 0)
-        let take = if hit = 1 then nearer else 0
-        bestHard <- if take = 1 then dep else bestHard
-        bestRec <- if take = 1 then b else bestRec
-        found <- if hit = 1 then 1 else found
-        j <- j + 1
+    // Whether the ray met a primitive at its TRUE radius, not merely at the
+    // k/4-expanded one. That distinction is the coverage test: inside the
+    // hard union there is certainly a surface, so the pixel is shaded
+    // whatever the Newton residual came out as. Only the sliver between the
+    // true and expanded radii — where the fillet may or may not have placed
+    // a surface — has to justify itself by converging.
+    let mutable foundHard = 0
+    let mutable pass = 0
+    while pass < 2 do
+        // pass 0 walks the anchors, pass 1 walks this tile's segments; both
+        // run the same intersection, so it is written once.
+        let lo = if pass = 0 then 0 else first
+        let hi = if pass = 0 then nAnchor else last
+        let mutable j = lo
+        while j < hi do
+            let cnt = if pass = 0 then 1 else 2
+            let mutable e = 0
+            while e < cnt do
+                let b =
+                    if pass = 0 then sb + j * 8
+                    else sb + (nAnchor + (Array.get data (ib + j)) + e) * 8
+                let cz = Array.get data (b + 5)
+                let rad = Array.get data (b + 6) + kPad
+                // A primitive cannot be hit nearer than its own front face,
+                // and the ray leans away from the axis, so this bound is
+                // conservative. One compare, no square root.
+                let bound = cz - rad + camF ()
+                let skip = if found = 1 then (if bound >= tBest then 1 else 0) else 0
+                if skip = 0 then
+                    let ocx = ex - Array.get data (b + 3)
+                    let ocy = ey - Array.get data (b + 4)
+                    let ocz = ez - cz
+                    let bq = (ocx * dux + ocy * duy + ocz * duz) / 1048576
+                    let oc2 = ocx * ocx + ocy * ocy + ocz * ocz
+                    let disc = bq * bq - (oc2 - rad * rad)
+                    if disc > 0 then
+                        let th = (0 - bq) - Fixed.isqrt disc
+                        if th > 0 then
+                            if found = 0 then
+                                tBest <- th
+                                found <- 1
+                            else
+                                if th < tBest then tBest <- th else ()
+                            // The same intersection at the unexpanded radius
+                            // — a compare and a multiply, no second root.
+                            let rt = Array.get data (b + 6)
+                            if bq * bq - (oc2 - rt * rt) > 0 then foundHard <- 1 else ()
+                        else ()
+                    else ()
+                else ()
+                e <- e + 1
+            j <- j + 1
+        pass <- pass + 1
     if found = 0 then bg
     else
-    // Second pass: blend the normals of every candidate whose surface lies
-    // within a narrow depth band of the winner. The glyph is a union of
-    // overlapping spheres, and on the intersection circle where two of them
-    // meet the visible surface belongs to neither — taking the winner's own
-    // normal there creases the union, which is the ridging along the swoop
-    // and the hard lens-shaped seam where the chain enters the ball.
-    //
-    // The band scales with the winning sphere so a large sphere blends over
-    // a proportionally larger neighbourhood than a small one.
-    // Fuse neighbouring chain samples into one smooth tube. Scaled by the
-    // winning sphere so a large one blends over a proportionally larger
-    // neighbourhood than a small one.
-    let bandR = Array.get data (bestRec + 2) / 3
-    let band = if bandR > 300 then bandR else 300
-    let mutable aNx = 0
-    let mutable aNy = 0
-    let mutable aNz = 0
-    let mutable aLx = 0
-    let mutable aLy = 0
-    let mutable aLz = 0
-    let mutable aW = 0
-    let mutable m = first
-    let mutable more = 1
-    while m < last && more = 1 do
-        let b = sb + (Array.get data (ib + m)) * 6
-        let rp8 = Array.get data (b + 2)
-        let z8 = Array.get data (b + 3)
-        // The tile list is sorted front-to-back, so once a candidate starts
-        // beyond the band every candidate after it does too.
-        if z8 + 1048576 >= bestHard + band then more <- 0
-        else
-            let dx8 = pxQ8 - (Array.get data b)
-            let dy8 = pyQ8 - (Array.get data (b + 1))
-            let d2 = dx8 * dx8 + dy8 * dy8
-            let near = if rp8 <= 0 then 0 else (if d2 > rp8 * rp8 then 0 else 1)
-            if near = 1 then
-                let nx = Fixed.clamp ((dx8 * 4096) / rp8) (0 - 4096) 4096
-                let ny = Fixed.clamp ((dy8 * 4096) / rp8) (0 - 4096) 4096
-                let nz2 = 16777216 - nx * nx - ny * ny
-                let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
-                let zHere = z8 + rp8 - (rp8 * nz) / 4096 + 1048576
-                let gap = zHere - bestHard
-                // The gradient of smin with respect to each input is its mix
-                // factor, so that factor IS the correct weight for blending
-                // the contributors' normals. Anything else describes a
-                // surface the depth fold did not produce.
-                let w = if gap < band then band - gap else 0
-                aNx <- aNx + nx * w
-                aNy <- aNy + ny * w
-                aNz <- aNz + nz * w
-                aLx <- aLx + (Array.get data (b + 4)) * w
-                aLy <- aLy + (Array.get data (b + 5)) * w
-                aLz <- aLz + (z8 - (rp8 * nz) / 4096) * w
-                aW <- aW + w
+
+    // Two Newton steps onto the smooth-union isosurface, then shade with
+    // the gradient at the point we landed on. Three field evaluations in
+    // all: the loop refines t on the first two and keeps the third's
+    // gradient.
+    let mutable t = tBest
+    let mutable fval = 0
+    let mutable fgx = 0
+    let mutable fgy = 0
+    let mutable fgz = 4096
+    let mutable pxp = 0
+    let mutable pyp = 0
+    let mutable pzp = 0
+    let mutable iter = 0
+    while iter < 3 do
+        let px = ex + (t * dux) / 1048576
+        let py = ey + (t * duy) / 1048576
+        let pz = ez + (t * duz) / 1048576
+
+        // --- tube group: hard minimum over round cones ------------------
+        // For segment a->b with radii r1->r2, the touching sphere's centre
+        // is at parameter u along the axis:
+        //     u = (y + rr*sqrt(X/A)) / l2
+        // with y = pa.ba, X = l2*|pa|^2 - y^2, A = l2 - rr^2. Clamping u to
+        // [0,1] folds in the spherical end caps, and A > 0 is exactly the
+        // tangent-cone condition |dr/ds| < 1. The distance is then just
+        // |p - q| - r(u), and the normal is the touching sphere's own —
+        // which is what an envelope normal is.
+        let mutable aBest = 1073741824
+        let mutable gax = 0
+        let mutable gay = 0
+        let mutable gaz = 4096
+        let mutable m = first
+        while m < last do
+            let ra = sb + (nAnchor + (Array.get data (ib + m))) * 8
+            let ax = Array.get data (ra + 3)
+            let ay = Array.get data (ra + 4)
+            let az = Array.get data (ra + 5)
+            let r1 = Array.get data (ra + 6)
+            let bax = Array.get data (ra + 11) - ax
+            let bay = Array.get data (ra + 12) - ay
+            let baz = Array.get data (ra + 13) - az
+            let rr = Array.get data (ra + 14) - r1
+            let l2 = bax * bax + bay * bay + baz * baz
+            let pax = px - ax
+            let pay = py - ay
+            let paz = pz - az
+            let yv = pax * bax + pay * bay + paz * baz
+            let pa2 = pax * pax + pay * pay + paz * paz
+            let aq = l2 - rr * rr
+            let xq = l2 * pa2 - yv * yv
+            // A <= 0 is the tangent cone degenerating: the radius changes
+            // faster along the segment than the segment is long, so one end
+            // sphere entirely swallows the other and the swept family has no
+            // envelope. The union is then just the larger sphere, which u at
+            // the corresponding endpoint expresses exactly. The chain really
+            // does this — it tapers 1560 -> 179 over 1177 units, |dr/ds| =
+            // 1.17 — and no amount of subdivision changes it, because it is a
+            // property of the curve and not of the sampling. Falling through
+            // to the capsule formula here instead undersizes the surface, and
+            // punched a comb of holes across the top of the arc.
+            let sq = if aq > 0 then (if xq > 0 then Fixed.isqrt (xq / aq) else 0) else 0
+            let u0 =
+                if aq > 0 then (if l2 > 0 then ((yv + rr * sq) * 4096) / l2 else 0)
+                else (if rr > 0 then 4096 else 0)
+            let u = Fixed.clamp u0 0 4096
+            let dqx = px - (ax + (u * bax) / 4096)
+            let dqy = py - (ay + (u * bay) / 4096)
+            let dqz = pz - (az + (u * baz) / 4096)
+            let dl = Fixed.isqrt (dqx * dqx + dqy * dqy + dqz * dqz)
+            let dv = dl - (r1 + (u * rr) / 4096)
+            if dv < aBest then
+                aBest <- dv
+                gax <- if dl > 0 then (dqx * 4096) / dl else 0
+                gay <- if dl > 0 then (dqy * 4096) / dl else 0
+                gaz <- if dl > 0 then (dqz * 4096) / dl else 4096
             else ()
-        m <- m + 1
-    // Renormalise the blended normal back to Q12 length.
-    let mx = if aW > 0 then aNx / aW else 0
-    let my = if aW > 0 then aNy / aW else 0
-    let mz = if aW > 0 then aNz / aW else 4096
-    // Every contributing normal is unit length, so the weighted average is
-    // short exactly where the contributors disagree — which is the concave
-    // valley where two surfaces meet, and nowhere else. That deficit is a
-    // free crease detector. Pushing it into +Z fills the valley toward the
-    // viewer the way a fillet would, so the join reads as one shaped piece
-    // instead of a dark seam, and anywhere smooth is left alone.
-    let mz2 = mz
-    let len = Fixed.isqrt (mx * mx + my * my + mz2 * mz2)
-    let sx = if len > 0 then (mx * 4096) / len else 0
-    let sy = if len > 0 then (my * 4096) / len else 0
-    let sz = if len > 0 then (mz2 * 4096) / len else 4096
-    let c = shadeNormal sx sy sz
-                        (if aW > 0 then aLx / aW else 0)
-                        (if aW > 0 then aLy / aW else 0)
-                        (if aW > 0 then aLz / aW else 0)
+            m <- m + 1
+
+        // --- anchor group: hard minimum over whole spheres ---------------
+        // Three of them, so there is nothing to tile. The winner's k is the
+        // fillet radius for this pixel: k belongs to the junction, and the
+        // junction is owned by the anchor.
+        let mutable bBest = 1073741824
+        let mutable gbx = 0
+        let mutable gby = 0
+        let mutable gbz = 4096
+        let mutable kw = 0
+        let mutable ai = 0
+        while ai < nAnchor do
+            let rc = sb + ai * 8
+            let dqx = px - Array.get data (rc + 3)
+            let dqy = py - Array.get data (rc + 4)
+            let dqz = pz - Array.get data (rc + 5)
+            let dl = Fixed.isqrt (dqx * dqx + dqy * dqy + dqz * dqz)
+            let dv = dl - Array.get data (rc + 6)
+            if dv < bBest then
+                bBest <- dv
+                kw <- Array.get data (rc + 7)
+                gbx <- if dl > 0 then (dqx * 4096) / dl else 0
+                gby <- if dl > 0 then (dqy * 4096) / dl else 0
+                gbz <- if dl > 0 then (dqz * 4096) / dl else 4096
+            else ()
+            ai <- ai + 1
+
+        // --- smooth union between the groups ----------------------------
+        // hv is smin's own interpolation parameter, and df/da = hv exactly,
+        // so the same number weights the value and the gradient. Fixed.smin
+        // stays the single definition of the blend law.
+        let hv =
+            if kw > 0 then Fixed.clamp (2048 + (2048 * (bBest - aBest)) / kw) 0 4096
+            else (if aBest < bBest then 4096 else 0)
+        fval <- Fixed.smin aBest bBest kw
+        fgx <- (hv * gax + (4096 - hv) * gbx) / 4096
+        fgy <- (hv * gay + (4096 - hv) * gby) / 4096
+        fgz <- (hv * gaz + (4096 - hv) * gbz) / 4096
+        pxp <- px
+        pyp <- py
+        pzp <- pz
+        if iter < 2 then
+            // df/dt = grad f . d, exact, because grad f is exact.
+            //
+            // The step is clamped because den is the cosine between the
+            // surface normal and the ray, and it goes to zero at grazing
+            // incidence — along every silhouette and across the tube's dark
+            // flank. There f/den diverges and two iterations cannot recover,
+            // which punched dithered holes in exactly those regions. The
+            // bound is the model's own: the start point is on a sphere
+            // inflated by k/4 and the true surface lies within k/4 of the
+            // hard union, so no honest correction exceeds k/2.
+            let den = (fgx * dux + fgy * duy + fgz * duz) / 1048576
+            let lim = kPad * 2
+            if den > 16 then t <- t - Fixed.clamp ((fval * 4096) / den) (0 - lim) lim
+            else if den < (0 - 16) then t <- t - Fixed.clamp ((fval * 4096) / den) (0 - lim) lim
+            else ()
+        else ()
+        iter <- iter + 1
+
+    // Coverage is decided by the hard union, not by the residual. A ray that
+    // entered a primitive at its true radius has hit the glyph, full stop.
+    // Only a ray binned solely for the k/4 sliver has to show that the
+    // fillet actually placed a surface in front of it.
+    // The tolerance is absolute and tight, because a converged root really is
+    // near zero — the offline reference settles inside ~6 of these units. It
+    // cannot be scaled to the fillet: k/4 is 450 here, while the stroke over
+    // the top of the arc has a radius of only 179, so a tolerance in that
+    // neighbourhood accepts rays that miss the glyph entirely and paints a
+    // fat speckled halo around the thinnest part of the swoop.
+    let reject = if foundHard = 1 then 0 else (if fval > 24 then 1 else 0)
+    if reject = 1 then bg
+    else
+    let gl = Fixed.isqrt (fgx * fgx + fgy * fgy + fgz * fgz)
+    let sx = if gl > 0 then (fgx * 4096) / gl else 0
+    let sy = if gl > 0 then (fgy * 4096) / gl else 0
+    let sz = if gl > 0 then (fgz * 4096) / gl else 4096
+    // The field's gradient points out of the solid, so at the front surface
+    // it points back toward the eye at -z. shadeNormal's convention is the
+    // opposite: nz > 0 faces the viewer.
+    let c = shadeNormal sx sy (0 - sz) pxp pyp pzp
     // shadeNormal packs 0xRRGGBB; the surface wants ABGR8888 (byte 0 = R)
     let r = c / 65536
     let g = (c / 256) % 256

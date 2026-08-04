@@ -78,8 +78,13 @@ let frontZ8 (x8: int) (r8: int) (st: int) : int =
 /// winner needs — computing both per candidate would shade the same pixel
 /// a dozen times over. Only nz is needed here, and it comes from one
 /// divide instead of the two the full normal costs.
+/// rp8 is the SCREEN radius and is used only for the disc test; r8 is the
+/// LOGO radius and is what the depth cap term needs, because z8 is a
+/// logo-space quantity. They differ by 13759/4096 and the perspective
+/// divide, so substituting one for the other exaggerates the pole-to-rim
+/// depth of every sphere — most for the largest ones.
 let hitDepth (pxQ8: int) (pyQ8: int)
-             (cx8: int) (cy8: int) (rp8: int) (z8: int) : int =
+             (cx8: int) (cy8: int) (rp8: int) (r8: int) (z8: int) : int =
     let dx8 = pxQ8 - cx8
     let dy8 = pyQ8 - cy8
     let d2 = dx8 * dx8 + dy8 * dy8
@@ -88,7 +93,7 @@ let hitDepth (pxQ8: int) (pyQ8: int)
     else
     let nz2 = if r2 > 0 then 16777216 - (d2 * 16777216) / r2 else 16777216
     let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
-    z8 + rp8 - (rp8 * nz) / 4096 + 1048576
+    z8 + r8 - (r8 * nz) / 4096 + 1048576
 
 /// Colour for a surface whose normal is (nx, ny, nz) in Q12, lit at the
 /// logo-space position (lx8, ly8, pz8). Packed 0xRRGGBB.

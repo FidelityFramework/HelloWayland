@@ -35,10 +35,18 @@ let smin (a: int) (b: int) (k: int) : int =
         m - (k * h * (4096 - h)) / 16777216
 
 /// Square root, seeded then refined a fixed four times. This is called
-/// once per candidate sphere per pixel, so the iteration count is the
-/// tracer's inner cost: an open Newton loop from x = n takes a division
-/// per halving (a dozen for a Q24 argument), whereas a seed within a
-/// factor of two converges to integer precision in four.
+/// several times per candidate primitive per pixel, so the iteration count
+/// is the tracer's inner cost: an open Newton loop from x = n takes a
+/// division per halving (a dozen for a Q24 argument), whereas a seed within
+/// a factor of two converges to integer precision in four.
+///
+/// The ladder runs to 2^36 because the tracer works in true 3D. The camera
+/// sits 66560 Q8 logo units off the projection plane, so |p - eye|^2 for a
+/// point anywhere on the glyph reaches ~1.4e10 — three rungs past where a
+/// screen-space tracer ever had to go. A seed that is too small does not
+/// fail loudly; four Newton steps from 8192 leave sqrt(1.4e10) short by a
+/// factor of three, which reads as geometry in the wrong place rather than
+/// as an error.
 let isqrt (n: int) : int =
     if n <= 0 then 0
     else
@@ -49,6 +57,13 @@ let isqrt (n: int) : int =
         if n > 65536 then y <- 512 else ()
         if n > 1048576 then y <- 2048 else ()
         if n > 16777216 then y <- 8192 else ()
+        if n > 268435456 then y <- 32768 else ()
+        // 2^32 and 2^36 as products: a literal wider than int32 wraps to
+        // zero here, and a zero threshold fires for every argument — which
+        // silently seeds small square roots from the top rung and returns
+        // them 3x too large. Same idiom as the 2^38 constant in Trace.
+        if n > (65536 * 65536) then y <- 131072 else ()
+        if n > (262144 * 262144) then y <- 524288 else ()
         y <- (y + n / y) / 2
         y <- (y + n / y) / 2
         y <- (y + n / y) / 2
