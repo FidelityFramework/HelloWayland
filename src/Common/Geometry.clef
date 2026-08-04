@@ -156,9 +156,22 @@ let shadeNormal (nx: int) (ny: int) (nz: int)
     let lit = 737 + (3359 * ndl) / 4096
     let glint = (216 * ((3400 * spec) / 4096)) / 4096
     let inten = lightAt lx8 ly8 pz8
-    let cr = Fixed.clamp ((((68 * lit) / 4096 + glint) * inten) / 4096) 0 255
-    let cg = Fixed.clamp ((((38 * lit) / 4096 + glint) * inten) / 4096) 0 255
-    let cb = Fixed.clamp ((((26 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    // Base albedo, Braidpoint orange #ec6911 (236, 105, 17).
+    //
+    // The old triple was (68, 38, 26) — a ratio of 1 : 0.56 : 0.38. The blue
+    // term is what made it read as brown rather than as a warm colour: at
+    // better than a third of the red it desaturates the hue toward grey
+    // before the light ever touches it. The brand orange is 1 : 0.45 : 0.07,
+    // the same family with the mud taken out.
+    //
+    // The magnitudes are scaled so the bulb reaches roughly the brand colour
+    // where it faces the light. Intensity still falls off with distance, so
+    // the dots and the tail sit darker than the bulb — that is the point
+    // light doing its job, not a colour choice. Highlights clip to white via
+    // glint, which is what makes the surface read as polished.
+    let cr = Fixed.clamp ((((137 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    let cg = Fixed.clamp (((( 61 * lit) / 4096 + glint) * inten) / 4096) 0 255
+    let cb = Fixed.clamp (((( 10 * lit) / 4096 + glint) * inten) / 4096) 0 255
     cr * 65536 + cg * 256 + cb
 
 /// Kernel entry — the contract the GPU backend leg dispatches over.

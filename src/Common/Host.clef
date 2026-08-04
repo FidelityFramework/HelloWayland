@@ -13,15 +13,30 @@
 /// above the fill contract — including the animation curve in Common.Anim
 /// and the geometry in Common.Model — is one definition.
 ///
-/// The blocking wl_display_dispatch is the frame throttle: the compositor
-/// fires frame-done at its refresh rate, so the animation matches the
-/// display without timers, and occlusion pauses it for free.
+/// RENDER IS DECOUPLED FROM PRESENT.
+///
+/// The loop used to block in wl_display_dispatch and paint exactly one
+/// frame per frame-done callback, which made the reported rate the
+/// *compositor's* rate, not the renderer's. That number is not a property
+/// of the tracer at all: the identical GPU binary reports ~180 on a 180 Hz
+/// laptop panel and ~60 on a 60 Hz 4K, because it was reporting the
+/// monitor. It also flattered whichever substrate was fast enough to idle —
+/// the GPU spends 1.4 ms of a 5.6 ms budget and waits out the rest, so its
+/// presented rate would be unchanged if the tracer were three times slower.
+///
+/// Now the loop renders continuously into the back buffer and presents the
+/// latest one whenever the compositor asks. Two rates are reported and
+/// labelled: `trace` is renders/sec, the substrate-comparable number, and
+/// `present` is the display. The cost is that a substrate with headroom
+/// busy-loops instead of sleeping, which is the honest price of measuring
+/// throughput rather than pacing.
 ///
 module Common.Host
 
 open Console
 open Fidelity.Wayland.Core
 open Fidelity.Wayland.Core.Api
+open Fidelity.Wayland.Protocol
 open Fidelity.Wayland.Bridge.Protocol
 open Fidelity.Wayland.Bridge.XdgShell
 open Fidelity.Wayland.Bridge.DmaBuf
@@ -43,6 +58,39 @@ let frameDone (data: nativeint) (callback: nativeint) (callbackData: uint32) : u
     let slots = NativePtr.ofNativeInt<uint32> data
     NativePtr.set slots 0 (uint32 1)
     NativePtr.set slots 1 callbackData
+
+/// Drain whatever Wayland events are already readable, without blocking.
+///
+/// wl_display_dispatch would sleep until an event arrives, which is exactly
+/// what has to stop happening for the render loop to run free. The
+/// prepare_read / poll / read_events sequence is the standard way to ask
+/// "is there anything on the socket right now?" — poll with a zero timeout
+/// answers immediately, and cancel_read backs the reservation out when the
+/// answer is no. dispatch_pending then runs the handlers for whatever is
+/// queued, including this frame's frame-done.
+///
+/// pfd is a malloc'd pollfd: { int fd; short events; short revents }. It is
+/// a raw buffer rather than a Clef record because records are memref-backed
+/// and would reach poll(2) as the address of a slot rather than as the
+/// struct — see Farscape docs/14_Binding_Generation_Gaps.md §3. Writing
+/// int32 1 at word 1 sets events = POLLIN and revents = 0 in one store.
+///
+/// Returns < 0 if the connection is gone.
+let private pumpEvents (disp: nativeint) (pfdRaw: nativeint)
+                       (pfd: nativeptr<int32>) (wfd: int) : int =
+    wl_display_flush (Some disp) |> ignore
+    let mutable rc = 0
+    if wl_display_prepare_read (Some disp) = 0 then
+        NativePtr.set pfd 0 (int32 wfd)
+        NativePtr.set pfd 1 (int32 1)
+        if Fidelity.Libc.Socket.poll (Some pfdRaw) (uint64 1) 0 > 0 then
+            rc <- wl_display_read_events (Some disp)
+        else
+            wl_display_cancel_read (Some disp)
+    else
+        ()
+    if rc < 0 then rc
+    else wl_display_dispatch_pending (Some disp)
 
 /// xdg_toplevel::configure handler — records the compositor-assigned
 /// window size (0 means "no preference"). data is the shared state
@@ -369,8 +417,13 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
+    // one pollfd for the non-blocking event pump
+    let pfdRaw =
+        match Fidelity.Libc.Memory.malloc (unativeint 8) with
+        | Some v -> v
+        | None -> 0n
     if strideStorage = 0n || mapDataStorage = 0n || samplesRaw = 0n || fillRaw = 0n
-       || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n then 1
+       || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n || pfdRaw = 0n then 1
     else
     let _ = Fidelity.Libc.Memory.memset (Some fillRaw) 0 (unativeint 256)
     let _ = Fidelity.Libc.Memory.memset (Some handlesRaw) 0 (unativeint 128)
@@ -378,6 +431,8 @@ let run (title: string) : int =
     let ctx = NativePtr.ofNativeInt<int32> ctxRaw
     let handles = NativePtr.ofNativeInt<nativeint> handlesRaw
     let frameSlots = NativePtr.ofNativeInt<uint32> frameSlotsRaw
+    let pfd = NativePtr.ofNativeInt<int32> pfdRaw
+    let waylandFd = wl_display_get_fd (Some disp)
     NativePtr.set frameSlots 0 (uint32 0)
     NativePtr.set frameSlots 1 (uint32 0)
 
@@ -424,67 +479,90 @@ let run (title: string) : int =
     Console.writeln "Host: entering frame loop..."
 
     let mutable front = 0
-    let mutable resized = false
+    let mutable needFullDamage = false
     let mutable latched = false
     let mutable firstMs = 0
-    let mutable frames = 0
-    let mutable fpsMarkMs = 0
+    let mutable lastMs = 0
+    let mutable renders = 0
+    let mutable presents = 0
+    let mutable markMs = 0
+    let mutable markRenders = 0
+    let mutable markPresents = 0
     let mutable running = true
     while running do
-        let result = Connection.dispatch disp
-        if result < 0 then
+        // Non-blocking. The loop must never sleep waiting on the socket,
+        // or the render rate collapses back onto the compositor's rate and
+        // we are measuring the monitor again.
+        if pumpEvents disp pfdRaw pfd waylandFd < 0 then
             running <- false
         else
         if NativePtr.get closeFlagPtr 0 = 1n then
             running <- false
         else
-        if int (NativePtr.get frameSlots 0) = 1 then
-            NativePtr.set frameSlots 0 (uint32 0)
-            // the uint32 timestamp sign-extends when bit 31 is set (the
-            // compositor clock has an undefined base); normalize to
-            // [0, 2^32) and wrap the deltas below
-            let ms0 = int (NativePtr.get frameSlots 1)
-            let ms = if ms0 < 0 then ms0 + 65536 * 65536 else ms0
-            if not latched then
-                latched <- true
-                firstMs <- ms
-                fpsMarkMs <- ms
+        // Apply any compositor resize before drawing this frame.
+        let confW = int (NativePtr.get confPtr 2)
+        let confH = int (NativePtr.get confPtr 3)
+        let newW = if confW > 0 then Fixed.clamp confW 480 4096 else curW
+        let newH = if confH > 0 then Fixed.clamp confH 720 4096 else curH
+        if newW <> curW || newH <> curH then
+            curW <- newW
+            curH <- newH
+            needFullDamage <- true
+            if rebuildSwapchain device dmabuf samples count
+                                strideStorage mapDataStorage ctx handles curW curH <> 0 then
+                running <- false
             else
-                ()
-            let d0 = ms - firstMs
+                front <- 0
+                Console.write "Host: resized to "
+                Console.write (Format.int curW)
+                Console.write "x"
+                Console.writeln (Format.int curH)
+        else
+            ()
+
+        if running then
+            // ---- RENDER, free-running --------------------------------
+            // Paint the back buffer every iteration, whether or not it will
+            // be shown. Between presents this repaints the same angle; that
+            // repetition is the point, because renders/sec then measures the
+            // tracer and nothing else. The angle still comes from the
+            // compositor clock, so what does reach the screen is on schedule.
+            let back = if front = 0 then 1 else 0
+            NativePtr.set handles 13 (nativeint back)
+            let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
+            let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
+            let d0 = lastMs - firstMs
             let elapsed = if d0 < 0 then d0 + 65536 * 65536 else d0
-            // 1000 ms phase offset starts the swing at 0 deg moving right
             let theta = Anim.angleAt (elapsed + 1000)
+            if renderInto bo strideStorage mapDataStorage handles
+                          samples count table ctx theta = 0 then
+                renders <- renders + 1
 
-            // apply any compositor resize before drawing this frame
-            let confW = int (NativePtr.get confPtr 2)
-            let confH = int (NativePtr.get confPtr 3)
-            let newW = if confW > 0 then Fixed.clamp confW 480 4096 else curW
-            let newH = if confH > 0 then Fixed.clamp confH 720 4096 else curH
-            resized <- false
-            if newW <> curW || newH <> curH then
-                curW <- newW
-                curH <- newH
-                resized <- true
-                if rebuildSwapchain device dmabuf samples count
-                                    strideStorage mapDataStorage ctx handles curW curH <> 0 then
-                    running <- false
-                else
-                    front <- 0
-                    Console.write "Host: resized to "
-                    Console.write (Format.int curW)
-                    Console.write "x"
-                    Console.writeln (Format.int curH)
-            else
-                ()
+                // Read events again before testing the flag. The pump at the
+                // top of this iteration ran BEFORE the render, and the
+                // callback requested at the previous present arrives *during*
+                // the render — so without this the flag is a whole render
+                // stale and is only ever observed on alternate iterations.
+                // The surface then presents at half the render rate, which
+                // showed up as trace 9 / present 4 and was visibly chunky.
+                let pumpRc = pumpEvents disp pfdRaw pfd waylandFd
+                if pumpRc < 0 then running <- false else ()
 
-            if running then
-                let back = if resized then 0 else (if front = 0 then 1 else 0)
-                NativePtr.set handles 13 (nativeint back)
-                let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
-                let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
-                if renderInto bo strideStorage mapDataStorage handles
-                              samples count table ctx theta = 0 then
+                // ---- PRESENT, only when the compositor asks -----------
+                if running && int (NativePtr.get frameSlots 0) = 1 then
+                    NativePtr.set frameSlots 0 (uint32 0)
+                    // the uint32 timestamp sign-extends when bit 31 is set
+                    // (the compositor clock has an undefined base);
+                    // normalize to [0, 2^32) and wrap the deltas below
+                    let ms0 = int (NativePtr.get frameSlots 1)
+                    let ms = if ms0 < 0 then ms0 + 65536 * 65536 else ms0
+                    if not latched then
+                        latched <- true
+                        firstMs <- ms
+                        markMs <- ms
+                    else
+                        ()
+                    lastMs <- ms
                     match wl_surface_frame surface with
                     | Some cb ->
                         wl_proxy_add_listener (Some cb) (nativeint &frameListener) (Some frameSlotsRaw) |> ignore
@@ -493,7 +571,7 @@ let run (title: string) : int =
                         running <- false
                     if running then
                         wl_surface_attach surface wlBuf (int32 0) (int32 0)
-                        if resized then
+                        if needFullDamage then
                             wl_surface_damage_buffer surface (int32 0) (int32 0) (int32 curW) (int32 curH)
                         else
                             wl_surface_damage_buffer surface
@@ -502,27 +580,43 @@ let run (title: string) : int =
                                 (int32 (int (NativePtr.get ctx 2) - int (NativePtr.get ctx 0)))
                                 (int32 (int (NativePtr.get ctx 3) - int (NativePtr.get ctx 1)))
                         wl_surface_commit surface
+                        // Flush here, not on the next pump. The pump's flush
+                        // runs at the top of the iteration, so leaving the
+                        // commit for it holds the frame in the outgoing
+                        // buffer for one whole render — which on the CPU is
+                        // ~110 ms and halved the present rate.
+                        wl_display_flush (Some disp) |> ignore
+                        needFullDamage <- false
                         front <- back
-                        frames <- frames + 1
-                        let dt0 = ms - fpsMarkMs
+                        presents <- presents + 1
+                        // Lazy reporting, on the clock we already hold.
+                        // Console.write is a write(2); gating it to 1 Hz
+                        // keeps it out of the render path whether the
+                        // substrate renders nine times a second or a
+                        // thousand. Count-based reporting cannot do that.
+                        let dt0 = ms - markMs
                         let dt = if dt0 < 0 then dt0 + 65536 * 65536 else dt0
-                        if frames % 120 = 0 && dt > 0 then
-                            let fps = 120000 / dt
-                            fpsMarkMs <- ms
-                            Console.write "Host: ~"
-                            Console.write (Format.int fps)
+                        if dt >= 1000 then
+                            Console.write "Host: trace "
+                            Console.write (Format.int (((renders - markRenders) * 1000) / dt))
+                            Console.write " fps   present "
+                            Console.write (Format.int (((presents - markPresents) * 1000) / dt))
                             Console.writeln " fps"
+                            markMs <- ms
+                            markRenders <- renders
+                            markPresents <- presents
                         else
                             ()
                     else
                         ()
                 else
-                    running <- false
+                    ()
             else
-                ()
+                running <- false
         else
             ()
 
+    Fidelity.Libc.Memory.free (Some pfdRaw) |> ignore
     Fidelity.Libc.Memory.free (Some frameSlotsRaw) |> ignore
     Fidelity.Libc.Memory.free (Some handlesRaw) |> ignore
     Fidelity.Libc.Memory.free (Some ctxRaw) |> ignore
