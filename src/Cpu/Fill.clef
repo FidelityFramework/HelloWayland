@@ -18,7 +18,7 @@ let label () : string = "CPU (Common.Trace, walked)"
 /// the CPU and GPU Driver rows at the same coordinates, and each build
 /// suppresses the other's — one asset, no duplication, and the plate cannot
 /// disagree with the binary because the binary is what selects.
-let plateCss () : string = "#label-gpu,#drv-gpu-1,#drv-gpu-2{display:none}"
+let plateCss () : string = "#tag-gpu,#drv-gpu-1,#drv-gpu-2{display:none}"
 
 /// The CPU writes pixels itself, so the shell must map the buffer object.
 let wantsCpuMapping () : int = 1
