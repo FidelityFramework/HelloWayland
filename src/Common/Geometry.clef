@@ -12,7 +12,9 @@ module Common.Geometry
 open Common.Fixed
 
 // Light: point source at (0, 0, -75) logo units, Q2 units (unit * 4),
-// reference d^2 = 235808 at the glyph centre.
+// reference d^2 = 235808 at the glyph centre. One source, and both halves
+// of the shading agree about it — lightAt takes its distance, shadeNormal
+// takes its direction, and neither approximates it as a distant light.
 // Perspective: F8 = 66560, pivot axis PX8 = 17423, camera axis PY8 = 17152,
 // logo-unit -> screen scale K12 = 13759.
 
@@ -106,8 +108,41 @@ let hitDepth (pxQ8: int) (pyQ8: int)
 /// seam where the chain enters the ball.
 let shadeNormal (nx: int) (ny: int) (nz: int)
                 (lx8: int) (ly8: int) (pz8: int) : int =
-    let ndl = Fixed.clamp ((nx * (0 - 1562) + ny * (0 - 1726) + nz * 3370) / 4096) 0 4096
-    let ndh = Fixed.clamp ((nx * (0 - 818) + ny * (0 - 904) + nz * 3910) / 4096) 0 4096
+    // Direction to the light, per shaded point. This used to be two frozen
+    // constants — (-1562,-1726,3370) and (-818,-904,3910) — which are
+    // exactly the light and half vectors for the point source at logo
+    // (0, 0, -75), evaluated once at the glyph centre. That made the model
+    // inconsistent with itself: lightAt already treats the source as a
+    // point and falls off with distance, while the direction was fixed as
+    // though the source were at infinity.
+    //
+    // Everything near the bulb is unaffected, because that is where the
+    // constants were fitted. The parts that were wrong are the ones far
+    // from it: the two dots sit at logo x ~ 110 against the bulb's ~ 38, so
+    // their true light vector is (-0.755, -0.409, 0.512) rather than
+    // (-0.381, -0.421, 0.823). Lit by the frozen pair they carried the
+    // bulb's highlight in the bulb's position, identically on both dots;
+    // lit properly the highlights swing toward the light and sit
+    // differently on each, because each is a different distance from it.
+    //
+    // The light sits at logo (0, 0, -75); -75 logo units is -19200 in Q8,
+    // and nz > 0 faces the viewer, so the depth term is pz8 + 19200.
+    let ux = 0 - lx8
+    let uy = 0 - ly8
+    let uz = pz8 + 19200
+    let ul = Fixed.isqrt (ux * ux + uy * uy + uz * uz)
+    let lxu = if ul > 0 then (ux * 4096) / ul else 0
+    let lyu = if ul > 0 then (uy * 4096) / ul else 0
+    let lzu = if ul > 0 then (uz * 4096) / ul else 4096
+    // Blinn half vector against the view direction, which is (0, 0, 1) in
+    // this convention because the shading frame already faces the viewer.
+    let hz0 = lzu + 4096
+    let hl = Fixed.isqrt (lxu * lxu + lyu * lyu + hz0 * hz0)
+    let hxu = if hl > 0 then (lxu * 4096) / hl else 0
+    let hyu = if hl > 0 then (lyu * 4096) / hl else 0
+    let hzu = if hl > 0 then (hz0 * 4096) / hl else 4096
+    let ndl = Fixed.clamp ((nx * lxu + ny * lyu + nz * lzu) / 4096) 0 4096
+    let ndh = Fixed.clamp ((nx * hxu + ny * hyu + nz * hzu) / 4096) 0 4096
     let p2 = (ndh * ndh) / 4096
     let p4 = (p2 * p2) / 4096
     let p8v = (p4 * p4) / 4096
