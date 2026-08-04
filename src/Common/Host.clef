@@ -128,6 +128,20 @@ let createWlBuffer (dmabuf: nativeint) (fd: int) (width: int) (height: int)
         zwp_linux_buffer_params_v1_destroy bufParams
         buffer
 
+/// Release a resource slot if it holds one.
+///
+/// Nine sites in rebuildSwapchain teardown spelled this out as
+/// `if p <> 0n then destroy p else ()`, which is nine copies of a guard and
+/// nine chances to write the wrong one. As a combinator the guard exists
+/// once and each site says only *what* it releases. Higher-order functions
+/// lower fine — Composer's 12_HigherOrderFunctions sample is the proof.
+let private releaseIf (p: nativeint) (destroy: nativeint -> unit) : unit =
+    if p <> 0n then destroy p else ()
+
+/// Same, for a file descriptor, where the empty value is 0 rather than 0n.
+let private closeIf (fd: int) : unit =
+    if fd > 0 then Fidelity.Libc.IO.close fd |> ignore else ()
+
 /// (Re)build the swapchain and static per-size data for window (w, h).
 /// handles = 10 nativeint slots, zero-initialized before the first call:
 ///   [0] bo0  [1] bo1  [2] wlBuf0  [3] wlBuf1
@@ -141,24 +155,18 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
                      (ctx: nativeptr<int32>) (handles: nativeptr<nativeint>)
                      (w: int) (h: int) : int =
     // tear down the previous size, if any
-    let oldWlBuf0 = NativePtr.get handles 2
-    let oldWlBuf1 = NativePtr.get handles 3
-    if oldWlBuf0 <> 0n then wl_buffer_destroy oldWlBuf0 else ()
-    if oldWlBuf1 <> 0n then wl_buffer_destroy oldWlBuf1 else ()
-    let oldBo0 = NativePtr.get handles 0
-    let oldBo1 = NativePtr.get handles 1
-    if oldBo0 <> 0n then Graphics.destroyBuffer oldBo0 else ()
-    if oldBo1 <> 0n then Graphics.destroyBuffer oldBo1 else ()
-    let oldFd0 = int (NativePtr.get handles 7)
-    let oldFd1 = int (NativePtr.get handles 8)
-    if oldFd0 > 0 then Fidelity.Libc.IO.close oldFd0 |> ignore else ()
-    if oldFd1 > 0 then Fidelity.Libc.IO.close oldFd1 |> ignore else ()
-    let oldBackdrop = NativePtr.get handles 4
-    let oldZbuf = NativePtr.get handles 5
-    let oldStaging = NativePtr.get handles 10
-    if oldBackdrop <> 0n then Fidelity.Libc.Memory.free (Some oldBackdrop) |> ignore else ()
-    if oldZbuf <> 0n then Fidelity.Libc.Memory.free (Some oldZbuf) |> ignore else ()
-    if oldStaging <> 0n then Fidelity.Libc.Memory.free (Some oldStaging) |> ignore else ()
+    // What this window size owned, released. The guard lives in releaseIf,
+    // so each line names a resource and its destructor and nothing else.
+    let freeMem (p: nativeint) : unit = Fidelity.Libc.Memory.free (Some p) |> ignore
+    releaseIf (NativePtr.get handles 2) wl_buffer_destroy      // wl_buffer 0
+    releaseIf (NativePtr.get handles 3) wl_buffer_destroy      // wl_buffer 1
+    releaseIf (NativePtr.get handles 0) Graphics.destroyBuffer // gbm bo 0
+    releaseIf (NativePtr.get handles 1) Graphics.destroyBuffer // gbm bo 1
+    closeIf   (int (NativePtr.get handles 7))                  // dmabuf fd 0
+    closeIf   (int (NativePtr.get handles 8))                  // dmabuf fd 1
+    releaseIf (NativePtr.get handles 4) freeMem                // backdrop
+    releaseIf (NativePtr.get handles 5) freeMem                // zbuf
+    releaseIf (NativePtr.get handles 10) freeMem               // staging
 
     let bo0 = Graphics.allocateRgbaBuffer device w h
     let bo1 = Graphics.allocateRgbaBuffer device w h

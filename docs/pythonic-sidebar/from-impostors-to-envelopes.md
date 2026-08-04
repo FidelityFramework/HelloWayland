@@ -281,6 +281,11 @@ that survive being retargeted.
 
 ## The lesson, stated once
 
+> Generalised, with two further cases from this repository, in
+> [docs/form-and-integrity.md](../form-and-integrity.md) — including one where
+> the branches genuinely vanish and one where they only become legible, which
+> is a distinction worth keeping honest.
+
 The Python prototype was a good way to find the shape of the answer, and
 the sidebar documents how cleanly that thinking crossed into Clef. What
 it could not tell us was that the *model* was a discretisation rather

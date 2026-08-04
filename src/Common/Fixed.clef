@@ -4,8 +4,11 @@
 /// unproven end-to-end, so everything here is integer fixed-point:
 /// Q8 (1/256) for coordinates and distances, Q12 (1/4096) for
 /// unit-scale values (radians, trig, normals, blend weights).
-/// Division by a power of two stands in for arithmetic shifts
-/// (shift operators are not in the proven Composer intrinsic set).
+///
+/// Division by a power of two is used for scaling throughout, which reads
+/// closer to the algebra than a shift does. Shifts are available — see
+/// Composer's 07_BitsTest sample — and are used below where the intent is
+/// genuinely a bit position rather than a division.
 module Common.Fixed
 
 /// Clamp v into [lo, hi].
@@ -50,20 +53,24 @@ let smin (a: int) (b: int) (k: int) : int =
 let isqrt (n: int) : int =
     if n <= 0 then 0
     else
-        let mutable y = 4
-        if n > 16 then y <- 8 else ()
-        if n > 256 then y <- 32 else ()
-        if n > 4096 then y <- 128 else ()
-        if n > 65536 then y <- 512 else ()
-        if n > 1048576 then y <- 2048 else ()
-        if n > 16777216 then y <- 8192 else ()
-        if n > 268435456 then y <- 32768 else ()
-        // 2^32 and 2^36 as products: a literal wider than int32 wraps to
-        // zero here, and a zero threshold fires for every argument — which
-        // silently seeds small square roots from the top rung and returns
-        // them 3x too large. Same idiom as the 2^38 constant in Trace.
-        if n > (65536 * 65536) then y <- 131072 else ()
-        if n > (262144 * 262144) then y <- 524288 else ()
+        // Rungs at 2^4k, seeds at 2^(2k+1) — twice the root of each rung's
+        // lower bound, which holds the seed within a factor of two of the
+        // true root and is what lets four Newton steps suffice.
+        //
+        // One piecewise expression, largest rung first. It was nine ordered
+        // `if n > t then y <- s else ()` statements whose correctness rested
+        // on the last write winning. See docs/form-and-integrity.md.
+        let mutable y =
+            if   n > (1 <<< 36) then 524288
+            elif n > (1 <<< 32) then 131072
+            elif n > (1 <<< 28) then 32768
+            elif n > (1 <<< 24) then 8192
+            elif n > (1 <<< 20) then 2048
+            elif n > (1 <<< 16) then 512
+            elif n > (1 <<< 12) then 128
+            elif n > (1 <<< 8)  then 32
+            elif n > (1 <<< 4)  then 8
+            else 4
         y <- (y + n / y) / 2
         y <- (y + n / y) / 2
         y <- (y + n / y) / 2
