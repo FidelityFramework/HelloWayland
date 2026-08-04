@@ -231,15 +231,19 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     // the two axes to fit rather than crop, and keep a tenth back as margin.
     let splashX = (w - 460) / 2
     let splashY = (h - 700) / 2
-    let slotY = 18
+    // The designator occupies composition rows 12..97, so the glyph starts
+    // below it. That costs the glyph roughly a quarter of its height, which
+    // is the price of a label legible from the back of a room — and the
+    // label is what makes a side-by-side demo self-explanatory.
+    let slotY = 110
     let slotW = 460
-    // 314, not the slot's nominal 330. The glyph's visible pixels stop well
-    // clear of the wordmark, but boundsOf pads the model's box by the
-    // perspective sweep (rp8/6 + dxa8/6) and the tracer paints its background
-    // across the whole padded rect — so the band was writing black over the
-    // top 14 rows of type the logo never reached. Measured, not guessed:
-    // the wordmark starts at composition row 358 and was rendering from 372.
-    let slotH = 314
+    // Bottom at 330, clear of the wordmark's 358. The margin matters because
+    // boundsOf pads the model's box by the perspective sweep (rp8/6 +
+    // dxa8/6) and the tracer paints its background across the whole padded
+    // rect — so a slot that merely fits the glyph still writes black over
+    // type the glyph never reaches. Measured, not guessed: at slot height
+    // 330 the wordmark lost 14 rows, at 314 it lost 3.
+    let slotH = 220
     let ext8x = if gx1 > gx0 then gx1 - gx0 else 1
     let ext8y = if gy1 > gy0 then gy1 - gy0 else 1
     let kx = (slotW * 4096 * 256) / ext8x
