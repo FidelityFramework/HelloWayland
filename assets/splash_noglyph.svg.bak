@@ -45,14 +45,14 @@
          id="g1"
          transform="translate(0,5.8720084)"><text
            xml:space="preserve"
-           style="font-style:italic;font-weight:500;font-size:33.8667px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Medium Italic';writing-mode:lr-tb;direction:ltr;opacity:1;fill:#ec6911;stroke:#ec6911;stroke-width:1.675;stroke-dasharray:none"
+           style="font-style:italic;font-weight:500;font-size:33.8667px;font-family:'Adwaita Sans';-inkscape-font-specification:'Adwaita Sans Medium Italic';writing-mode:lr-tb;direction:ltr;opacity:1;fill:#000000;stroke:#000000;stroke-width:1.675;stroke-dasharray:none"
            x="66.13736"
            y="123.93028"
            id="text1"
            inkscape:label="text1"><tspan
              sodipodi:role="line"
              id="tspan1"
-             style="font-style:italic;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:33.8667px;font-family:Z003;-inkscape-font-specification:'Z003 Italic';stroke:#ec6911;stroke-width:1.675;stroke-dasharray:none;stroke-opacity:1"
+             style="font-style:italic;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:33.8667px;font-family:Z003;-inkscape-font-specification:'Z003 Italic';stroke:#000000;stroke-width:1.675;stroke-dasharray:none;stroke-opacity:1"
              x="66.13736"
              y="123.93028">Clef</tspan></text></g><rect
          style="fill:#d2d2d2;fill-opacity:0.383589;stroke:none;stroke-width:1.675;stroke-dasharray:none;stroke-opacity:1"

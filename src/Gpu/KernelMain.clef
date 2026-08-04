@@ -13,9 +13,9 @@ open Gpu.Kernel
 [<EntryPoint>]
 let main _ =
     // Reference every function that must survive tree shaking.
-    let a = Geometry.projX8 9830 4096 0 38057
-    let b = Geometry.projY8 9830 9830 0 31359
-    let c = Geometry.projR8 9830 4237 0
+    let a = Geometry.projX8 9830 4096 0 38057 13759
+    let b = Geometry.projY8 9830 9830 0 31359 13759
+    let c = Geometry.projR8 9830 4237 0 13759
     let d = Geometry.frontZ8 9830 4237 0
     let e = Geometry.lightAt 9830 9830 0
     let f = Geometry.hitDepth (a + 100) (b + 50) a b c 4237 d

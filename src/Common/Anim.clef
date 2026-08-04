@@ -23,11 +23,11 @@ let angleAt (elapsedMs: int) : int =
 /// margin (offset/6) on top of fixed padding. Reads the origin from
 /// ctx[6..7] and writes the clip rect into ctx[0..3] (window px,
 /// unclamped — the caller clamps to the window).
-let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) : unit =
+let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) (k12: int) : unit =
     let ox8 = int (NativePtr.get ctx 6)
     let oy8 = int (NativePtr.get ctx 7)
-    let ax8 = ox8 + (13759 * 17423) / 4096
-    let ay8 = oy8 + (13759 * 17152) / 4096
+    let ax8 = ox8 + (k12 * 17423) / 4096
+    let ay8 = oy8 + (k12 * 17152) / 4096
     let mutable minX = 1000000
     let mutable minY = 1000000
     let mutable maxX = 0 - 1000000
@@ -49,9 +49,9 @@ let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) : 
         let x8 = int (NativePtr.get samples (k * 4 + 0))
         let y8 = int (NativePtr.get samples (k * 4 + 1))
         let r8 = int (NativePtr.get samples (k * 4 + 2))
-        let sx8 = ox8 + (13759 * x8) / 4096
-        let sy8 = oy8 + (13759 * y8) / 4096
-        let rp8 = ((r8 + kPad) * 13759) / 4096
+        let sx8 = ox8 + (k12 * x8) / 4096
+        let sy8 = oy8 + (k12 * y8) / 4096
+        let rp8 = ((r8 + kPad) * k12) / 4096
         let ext8 = rp8 + rp8 / 6            // radius * 1.167 perspective margin
         let dxa8 = if sx8 > ax8 then sx8 - ax8 else ax8 - sx8
         let dya8 = if sy8 > ay8 then sy8 - ay8 else ay8 - sy8

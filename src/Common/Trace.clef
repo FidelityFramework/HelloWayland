@@ -67,7 +67,7 @@
 ///   [8]  tilesX               [9]  tilesY
 ///   [10] 65536 / tileSize     [11] primitive record base
 ///   [12] tile offset base     [13] tile item base
-///   [14] unused               [15] used length
+///   [14] logo scale k12       [15] used length
 ///   [16] band first row       [17] band row count
 ///   [18] 2^38 / stride        [19] anchor count
 ///   [20] origin x8            [21] origin y8
@@ -106,7 +106,7 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
               (stridePx: int) (h: int) (ox8: int) (oy8: int)
               (ct: int) (st: int) (w: int)
               (rx0: int) (ry0: int) (rx1: int) (ry1: int)
-              (bandY0: int) (bandRows: int) (nAnchor: int) : unit =
+              (bandY0: int) (bandRows: int) (nAnchor: int) (k12: int) : unit =
     let recBase = 24
     let offsetBase = recBase + count * 8
     let itemBase = offsetBase + maxTiles () + 1
@@ -149,9 +149,9 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
         let sk = int (NativePtr.get samples (k * 4 + 3))
         let b = recBase + k * 8
         let rx = sx - camX ()
-        Array.set table b (projX8 sx ct st ox8)
-        Array.set table (b + 1) (projY8 sx sy st oy8)
-        Array.set table (b + 2) (projR8 sx (sr + kPad) st)
+        Array.set table b (projX8 sx ct st ox8 k12)
+        Array.set table (b + 1) (projY8 sx sy st oy8 k12)
+        Array.set table (b + 2) (projR8 sx (sr + kPad) st k12)
         Array.set table (b + 3) (camX () + (rx * ct) / 4096)
         Array.set table (b + 4) sy
         Array.set table (b + 5) ((rx * st) / 4096)
@@ -295,7 +295,7 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     Array.set table 11 recBase
     Array.set table 12 offsetBase
     Array.set table 13 itemBase
-    Array.set table 14 0
+    Array.set table 14 k12
     Array.set table 15 (itemBase + used)
     Array.set table 16 bandY0
     Array.set table 17 bandRows
@@ -307,6 +307,12 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     Array.set table 21 oy8
     Array.set table 22 kPad
     Array.set table 23 nSeg
+
+/// The value `pixel` returns where the ray misses the glyph. A Fill that has
+/// a backdrop to preserve tests against this and leaves those pixels alone,
+/// which is what makes the logo composite over the chrome rather than
+/// painting a black rectangle across it.
+let background () : int = 16777216 * 255
 
 /// Shade one pixel of the frame the table describes.
 let pixel (i: int) (data: int array) (n: int) : int =
@@ -324,7 +330,7 @@ let pixel (i: int) (data: int array) (n: int) : int =
     // silhouette falls to near-black at every grazing edge; over a blue
     // gradient that rim read as a dirty fringe, and over black it reads as
     // form. Being a constant it also costs nothing.
-    let bg = 16777216 * 255
+    let bg = background ()
     if gx >= w then bg
     else
     let rx0 = Array.get data 4
@@ -352,8 +358,9 @@ let pixel (i: int) (data: int array) (n: int) : int =
     // projection plane z = 0, then aim from the eye through that point.
     // Perspective is entirely in this construction, which is why the table
     // stores unprojected 3D centres.
-    let lx8 = ((gx * 256 - Array.get data 20) * 4096) / 13759
-    let ly8 = ((gy * 256 - Array.get data 21) * 4096) / 13759
+    let k12 = Array.get data 14
+    let lx8 = ((gx * 256 - Array.get data 20) * 4096) / k12
+    let ly8 = ((gy * 256 - Array.get data 21) * 4096) / k12
     let ex = camX ()
     let ey = camY ()
     let ez = 0 - camF ()

@@ -13,30 +13,15 @@
 /// above the fill contract — including the animation curve in Common.Anim
 /// and the geometry in Common.Model — is one definition.
 ///
-/// RENDER IS DECOUPLED FROM PRESENT.
-///
-/// The loop used to block in wl_display_dispatch and paint exactly one
-/// frame per frame-done callback, which made the reported rate the
-/// *compositor's* rate, not the renderer's. That number is not a property
-/// of the tracer at all: the identical GPU binary reports ~180 on a 180 Hz
-/// laptop panel and ~60 on a 60 Hz 4K, because it was reporting the
-/// monitor. It also flattered whichever substrate was fast enough to idle —
-/// the GPU spends 1.4 ms of a 5.6 ms budget and waits out the rest, so its
-/// presented rate would be unchanged if the tracer were three times slower.
-///
-/// Now the loop renders continuously into the back buffer and presents the
-/// latest one whenever the compositor asks. Two rates are reported and
-/// labelled: `trace` is renders/sec, the substrate-comparable number, and
-/// `present` is the display. The cost is that a substrate with headroom
-/// busy-loops instead of sleeping, which is the honest price of measuring
-/// throughput rather than pacing.
+/// The blocking wl_display_dispatch is the frame throttle: the compositor
+/// fires frame-done at its refresh rate, so the animation matches the
+/// display without timers, and occlusion pauses it for free.
 ///
 module Common.Host
 
 open Console
 open Fidelity.Wayland.Core
 open Fidelity.Wayland.Core.Api
-open Fidelity.Wayland.Protocol
 open Fidelity.Wayland.Bridge.Protocol
 open Fidelity.Wayland.Bridge.XdgShell
 open Fidelity.Wayland.Bridge.DmaBuf
@@ -44,6 +29,8 @@ open Fidelity.Wayland.Bridge.Callbacks
 open Platform.Display.Connection
 open Platform.Display.Surface
 open Platform.Display.Graphics
+open Platform.Display.Svg
+open Platform.Display.Compositing
 open Common.Fixed
 open Common.Model
 open Common.Anim
@@ -58,39 +45,6 @@ let frameDone (data: nativeint) (callback: nativeint) (callbackData: uint32) : u
     let slots = NativePtr.ofNativeInt<uint32> data
     NativePtr.set slots 0 (uint32 1)
     NativePtr.set slots 1 callbackData
-
-/// Drain whatever Wayland events are already readable, without blocking.
-///
-/// wl_display_dispatch would sleep until an event arrives, which is exactly
-/// what has to stop happening for the render loop to run free. The
-/// prepare_read / poll / read_events sequence is the standard way to ask
-/// "is there anything on the socket right now?" — poll with a zero timeout
-/// answers immediately, and cancel_read backs the reservation out when the
-/// answer is no. dispatch_pending then runs the handlers for whatever is
-/// queued, including this frame's frame-done.
-///
-/// pfd is a malloc'd pollfd: { int fd; short events; short revents }. It is
-/// a raw buffer rather than a Clef record because records are memref-backed
-/// and would reach poll(2) as the address of a slot rather than as the
-/// struct — see Farscape docs/14_Binding_Generation_Gaps.md §3. Writing
-/// int32 1 at word 1 sets events = POLLIN and revents = 0 in one store.
-///
-/// Returns < 0 if the connection is gone.
-let private pumpEvents (disp: nativeint) (pfdRaw: nativeint)
-                       (pfd: nativeptr<int32>) (wfd: int) : int =
-    wl_display_flush (Some disp) |> ignore
-    let mutable rc = 0
-    if wl_display_prepare_read (Some disp) = 0 then
-        NativePtr.set pfd 0 (int32 wfd)
-        NativePtr.set pfd 1 (int32 1)
-        if Fidelity.Libc.Socket.poll (Some pfdRaw) (uint64 1) 0 > 0 then
-            rc <- wl_display_read_events (Some disp)
-        else
-            wl_display_cancel_read (Some disp)
-    else
-        ()
-    if rc < 0 then rc
-    else wl_display_dispatch_pending (Some disp)
 
 /// xdg_toplevel::configure handler — records the compositor-assigned
 /// window size (0 means "no preference"). data is the shared state
@@ -181,7 +135,7 @@ let createWlBuffer (dmabuf: nativeint) (fd: int) (width: int) (height: int)
 ///   [12] the substrate's Fill state block
 /// Existing entries are destroyed first. ctx receives the window size,
 /// glyph origin, zbuf stride, and clip rect. Returns 0 on success.
-let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
+let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativeint)
                      (samples: nativeptr<int32>) (count: int)
                      (strideStorage: nativeint) (mapDataStorage: nativeint)
                      (ctx: nativeptr<int32>) (handles: nativeptr<nativeint>)
@@ -258,16 +212,38 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
         if my8 - mr8 < gy0 then gy0 <- my8 - mr8 else ()
         if my8 + mr8 > gy1 then gy1 <- my8 + mr8 else ()
         m <- m + 1
-    // Logo Q8 scales to screen Q8 by 13759/4096. Solve for the origin that
-    // puts the glyph's projected box in the middle of the window.
-    let gw8 = (13759 * (gx1 - gx0)) / 4096
-    let gh8 = (13759 * (gy1 - gy0)) / 4096
-    NativePtr.set ctx 6 (int32 ((w * 256 - gw8) / 2 - (13759 * gx0) / 4096))
-    NativePtr.set ctx 7 (int32 ((h * 256 - gh8) / 2 - (13759 * gy0) / 4096))
+    // Size and place the glyph inside the slot the splash reserves for it.
+    //
+    // The composition is 460x700 and holds the wordmark at y~355-465 and the
+    // spec panel at y~485-665, so everything above y~350 is the glyph's. The
+    // scale used to be the constant 13759/4096, which rendered the model at a
+    // fixed 401x441 px whatever the window did — taller than the 330 px slot,
+    // which is why the glyph overran the composition instead of sitting in it.
+    //
+    // screen_px = k12 * logoQ8 / (4096 * 256), so the k12 that makes the model
+    // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
+    // the two axes to fit rather than crop, and keep a tenth back as margin.
+    let splashX = (w - 460) / 2
+    let splashY = (h - 700) / 2
+    let slotY = 18
+    let slotW = 460
+    let slotH = 330
+    let ext8x = if gx1 > gx0 then gx1 - gx0 else 1
+    let ext8y = if gy1 > gy0 then gy1 - gy0 else 1
+    let kx = (slotW * 4096 * 256) / ext8x
+    let ky = (slotH * 4096 * 256) / ext8y
+    let kFit = if kx < ky then kx else ky
+    let k12 = (kFit * 9) / 10
+    NativePtr.set ctx 13 (int32 k12)
+    // Centre the model's box on the slot's centre, in the splash's frame.
+    let cxPx = splashX + slotW / 2
+    let cyPx = splashY + slotY + slotH / 2
+    NativePtr.set ctx 6 (int32 (cxPx * 256 - (k12 * ((gx0 + gx1) / 2)) / 4096))
+    NativePtr.set ctx 7 (int32 (cyPx * 256 - (k12 * ((gy0 + gy1) / 2)) / 4096))
     NativePtr.set ctx 8 (int32 w)
     // Conservative glyph bound: the tracer's sweep rect and the damage
     // region the shell reports to the compositor are the same rectangle.
-    Anim.boundsOf samples count ctx
+    Anim.boundsOf samples count ctx (int (NativePtr.get ctx 13))
     NativePtr.set ctx 0 (int32 (Fixed.clamp (int (NativePtr.get ctx 0)) 0 w))
     NativePtr.set ctx 1 (int32 (Fixed.clamp (int (NativePtr.get ctx 1)) 0 h))
     NativePtr.set ctx 2 (int32 (Fixed.clamp (int (NativePtr.get ctx 2)) 0 w))
@@ -275,7 +251,11 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
     // A fresh swapchain has two buffers of undefined content, so the next
     // two frames paint the whole window; after that only the glyph's rows
     // change and the rest of each buffer is already correct.
-    NativePtr.set ctx 12 (int32 2)
+    // No full-window repaints. The swapchain buffers are seeded with the
+    // chrome just below, and a full paint would have the tracer overwrite
+    // every pixel with its own background — erasing exactly what was seeded.
+    // The band is the glyph's rect from the first frame onward.
+    NativePtr.set ctx 12 (int32 0)
     // Then hand off: Fill owns only whatever resources its strategy needs.
     if Fill.resize samples count ctx (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12)) w h stride <> 0 then 1
     else
@@ -293,6 +273,47 @@ let rebuildSwapchain (device: nativeint) (dmabuf: nativeint)
     NativePtr.set handles 1 bo1
     NativePtr.set handles 2 wlBuf0
     NativePtr.set handles 3 wlBuf1
+    // Static backdrop, painted once per window size: solid ground with the
+    // splash composited at its natural 460x700 into the middle. The tracer
+    // still owns its band, so this shows through everywhere the glyph's rows
+    // are not — which is exactly the seam the next step closes by having
+    // Trace.pixel sample this buffer instead of returning a constant.
+    let backdropBytes = stride * h
+    let backdrop =
+        match Fidelity.Libc.Memory.malloc (unativeint backdropBytes) with
+        | Some v -> v
+        | None -> 0n
+    if backdrop = 0n then 1
+    else
+    Compositing.paintSolidColor backdrop w h stride 0 0 0
+    if splashPix <> 0n then
+        Compositing.compositeOver backdrop w h stride splashPix 460 700
+                                  ((w - 460) / 2) ((h - 700) / 2)
+    else
+        ()
+    NativePtr.set handles 4 backdrop
+    // Seed both swapchain buffers with the chrome, once. The splash has no
+    // background of its own — the only rect is the translucent panel — so it
+    // is transparent artwork over black, and the tracer's own black inside
+    // its band is already the right colour there.
+    //
+    // This is why nothing has to be composited per frame: with the glyph now
+    // scaled into the slot the composition reserves (y ~18-348), its band no
+    // longer reaches the wordmark at 355 or the panel at 485. The band and
+    // the chrome are disjoint, so each can own its pixels outright. It also
+    // works on both substrates, where per-frame compositing did not: the GPU
+    // kernel writes the scanout buffer directly and stores every pixel, so it
+    // could never have skipped a miss to let a backdrop show through.
+    let mutable seed = 0
+    while seed < 2 do
+        let sbo = if seed = 0 then bo0 else bo1
+        NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
+        let sm = Graphics.mapBufferWrite sbo w h strideStorage mapDataStorage
+        if sm <> 0n then
+            Fidelity.Libc.Memory.memcpy (Some sm) (Some backdrop) (unativeint backdropBytes) |> ignore
+            Graphics.unmapBuffer sbo (NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage))
+        else ()
+        seed <- seed + 1
     NativePtr.set handles 6 (nativeint stride)
     NativePtr.set handles 7 (nativeint fd0)
     NativePtr.set handles 8 (nativeint fd1)
@@ -327,6 +348,7 @@ let renderInto (bo: nativeint) (strideStorage: nativeint) (mapDataStorage: nativ
                     (int (NativePtr.get ctx 0)) (int (NativePtr.get ctx 1))
                     (int (NativePtr.get ctx 2)) (int (NativePtr.get ctx 3))
                     bandY0 bandRows (Model.anchorCount ())
+                    (int (NativePtr.get ctx 13))
     if Fill.wantsCpuMapping () = 0 then
         // The substrate addresses the buffer itself; mapping it here would
         // stage a CPU copy over the top of the device's own writes.
@@ -396,6 +418,15 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
+    // One rasterization for the life of the process: the splash is authored
+    // at 460x700 and composited at that natural size, so it does not depend
+    // on the window. Fonts come from the system set (Adwaita Sans, Z003),
+    // which resvg resolves at parse time.
+    // Absolute for now — the binary runs from targets/, so a relative path
+    // misses. Belongs in a resource-path lookup once the chrome is real.
+    let splashPix = Svg.rasterize "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg" 460 700
+    if splashPix = 0n then Console.writeln "Host: splash rasterize failed (continuing without it)" else ()
+
     // 508 points x 4 int32 (x, y, r, k) — the quad stride the model writes.
     let samplesRaw =
         match Fidelity.Libc.Memory.malloc (unativeint 8192) with
@@ -417,13 +448,8 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
-    // one pollfd for the non-blocking event pump
-    let pfdRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 8) with
-        | Some v -> v
-        | None -> 0n
     if strideStorage = 0n || mapDataStorage = 0n || samplesRaw = 0n || fillRaw = 0n
-       || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n || pfdRaw = 0n then 1
+       || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n then 1
     else
     let _ = Fidelity.Libc.Memory.memset (Some fillRaw) 0 (unativeint 256)
     let _ = Fidelity.Libc.Memory.memset (Some handlesRaw) 0 (unativeint 128)
@@ -431,8 +457,6 @@ let run (title: string) : int =
     let ctx = NativePtr.ofNativeInt<int32> ctxRaw
     let handles = NativePtr.ofNativeInt<nativeint> handlesRaw
     let frameSlots = NativePtr.ofNativeInt<uint32> frameSlotsRaw
-    let pfd = NativePtr.ofNativeInt<int32> pfdRaw
-    let waylandFd = wl_display_get_fd (Some disp)
     NativePtr.set frameSlots 0 (uint32 0)
     NativePtr.set frameSlots 1 (uint32 0)
 
@@ -452,7 +476,7 @@ let run (title: string) : int =
     let mutable curH = if confH0 > 0 then Fixed.clamp confH0 720 4096 else 900
 
     NativePtr.set handles 12 fillRaw
-    if rebuildSwapchain device dmabuf samples count
+    if rebuildSwapchain splashPix device dmabuf samples count
                         strideStorage mapDataStorage ctx handles curW curH <> 0 then 1
     else
     Console.write "Host: window "
@@ -479,90 +503,67 @@ let run (title: string) : int =
     Console.writeln "Host: entering frame loop..."
 
     let mutable front = 0
-    let mutable needFullDamage = false
+    let mutable resized = false
     let mutable latched = false
     let mutable firstMs = 0
-    let mutable lastMs = 0
-    let mutable renders = 0
-    let mutable presents = 0
-    let mutable markMs = 0
-    let mutable markRenders = 0
-    let mutable markPresents = 0
+    let mutable frames = 0
+    let mutable fpsMarkMs = 0
     let mutable running = true
     while running do
-        // Non-blocking. The loop must never sleep waiting on the socket,
-        // or the render rate collapses back onto the compositor's rate and
-        // we are measuring the monitor again.
-        if pumpEvents disp pfdRaw pfd waylandFd < 0 then
+        let result = Connection.dispatch disp
+        if result < 0 then
             running <- false
         else
         if NativePtr.get closeFlagPtr 0 = 1n then
             running <- false
         else
-        // Apply any compositor resize before drawing this frame.
-        let confW = int (NativePtr.get confPtr 2)
-        let confH = int (NativePtr.get confPtr 3)
-        let newW = if confW > 0 then Fixed.clamp confW 480 4096 else curW
-        let newH = if confH > 0 then Fixed.clamp confH 720 4096 else curH
-        if newW <> curW || newH <> curH then
-            curW <- newW
-            curH <- newH
-            needFullDamage <- true
-            if rebuildSwapchain device dmabuf samples count
-                                strideStorage mapDataStorage ctx handles curW curH <> 0 then
-                running <- false
+        if int (NativePtr.get frameSlots 0) = 1 then
+            NativePtr.set frameSlots 0 (uint32 0)
+            // the uint32 timestamp sign-extends when bit 31 is set (the
+            // compositor clock has an undefined base); normalize to
+            // [0, 2^32) and wrap the deltas below
+            let ms0 = int (NativePtr.get frameSlots 1)
+            let ms = if ms0 < 0 then ms0 + 65536 * 65536 else ms0
+            if not latched then
+                latched <- true
+                firstMs <- ms
+                fpsMarkMs <- ms
             else
-                front <- 0
-                Console.write "Host: resized to "
-                Console.write (Format.int curW)
-                Console.write "x"
-                Console.writeln (Format.int curH)
-        else
-            ()
-
-        if running then
-            // ---- RENDER, free-running --------------------------------
-            // Paint the back buffer every iteration, whether or not it will
-            // be shown. Between presents this repaints the same angle; that
-            // repetition is the point, because renders/sec then measures the
-            // tracer and nothing else. The angle still comes from the
-            // compositor clock, so what does reach the screen is on schedule.
-            let back = if front = 0 then 1 else 0
-            NativePtr.set handles 13 (nativeint back)
-            let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
-            let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
-            let d0 = lastMs - firstMs
+                ()
+            let d0 = ms - firstMs
             let elapsed = if d0 < 0 then d0 + 65536 * 65536 else d0
+            // 1000 ms phase offset starts the swing at 0 deg moving right
             let theta = Anim.angleAt (elapsed + 1000)
-            if renderInto bo strideStorage mapDataStorage handles
-                          samples count table ctx theta = 0 then
-                renders <- renders + 1
 
-                // Read events again before testing the flag. The pump at the
-                // top of this iteration ran BEFORE the render, and the
-                // callback requested at the previous present arrives *during*
-                // the render — so without this the flag is a whole render
-                // stale and is only ever observed on alternate iterations.
-                // The surface then presents at half the render rate, which
-                // showed up as trace 9 / present 4 and was visibly chunky.
-                let pumpRc = pumpEvents disp pfdRaw pfd waylandFd
-                if pumpRc < 0 then running <- false else ()
+            // apply any compositor resize before drawing this frame
+            let confW = int (NativePtr.get confPtr 2)
+            let confH = int (NativePtr.get confPtr 3)
+            let newW = if confW > 0 then Fixed.clamp confW 480 4096 else curW
+            let newH = if confH > 0 then Fixed.clamp confH 720 4096 else curH
+            resized <- false
+            if newW <> curW || newH <> curH then
+                curW <- newW
+                curH <- newH
+                resized <- true
+                if rebuildSwapchain splashPix device dmabuf samples count
+                                    strideStorage mapDataStorage ctx handles curW curH <> 0 then
+                    running <- false
+                else
+                    front <- 0
+                    Console.write "Host: resized to "
+                    Console.write (Format.int curW)
+                    Console.write "x"
+                    Console.writeln (Format.int curH)
+            else
+                ()
 
-                // ---- PRESENT, only when the compositor asks -----------
-                if running && int (NativePtr.get frameSlots 0) = 1 then
-                    NativePtr.set frameSlots 0 (uint32 0)
-                    // the uint32 timestamp sign-extends when bit 31 is set
-                    // (the compositor clock has an undefined base);
-                    // normalize to [0, 2^32) and wrap the deltas below
-                    let ms0 = int (NativePtr.get frameSlots 1)
-                    let ms = if ms0 < 0 then ms0 + 65536 * 65536 else ms0
-                    if not latched then
-                        latched <- true
-                        firstMs <- ms
-                        markMs <- ms
-                    else
-                        ()
-                    lastMs <- ms
+            if running then
+                let back = if resized then 0 else (if front = 0 then 1 else 0)
+                NativePtr.set handles 13 (nativeint back)
+                let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
+                let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
+                if renderInto bo strideStorage mapDataStorage handles
+                              samples count table ctx theta = 0 then
                     match wl_surface_frame surface with
                     | Some cb ->
                         wl_proxy_add_listener (Some cb) (nativeint &frameListener) (Some frameSlotsRaw) |> ignore
@@ -571,7 +572,7 @@ let run (title: string) : int =
                         running <- false
                     if running then
                         wl_surface_attach surface wlBuf (int32 0) (int32 0)
-                        if needFullDamage then
+                        if resized then
                             wl_surface_damage_buffer surface (int32 0) (int32 0) (int32 curW) (int32 curH)
                         else
                             wl_surface_damage_buffer surface
@@ -580,43 +581,27 @@ let run (title: string) : int =
                                 (int32 (int (NativePtr.get ctx 2) - int (NativePtr.get ctx 0)))
                                 (int32 (int (NativePtr.get ctx 3) - int (NativePtr.get ctx 1)))
                         wl_surface_commit surface
-                        // Flush here, not on the next pump. The pump's flush
-                        // runs at the top of the iteration, so leaving the
-                        // commit for it holds the frame in the outgoing
-                        // buffer for one whole render — which on the CPU is
-                        // ~110 ms and halved the present rate.
-                        wl_display_flush (Some disp) |> ignore
-                        needFullDamage <- false
                         front <- back
-                        presents <- presents + 1
-                        // Lazy reporting, on the clock we already hold.
-                        // Console.write is a write(2); gating it to 1 Hz
-                        // keeps it out of the render path whether the
-                        // substrate renders nine times a second or a
-                        // thousand. Count-based reporting cannot do that.
-                        let dt0 = ms - markMs
+                        frames <- frames + 1
+                        let dt0 = ms - fpsMarkMs
                         let dt = if dt0 < 0 then dt0 + 65536 * 65536 else dt0
-                        if dt >= 1000 then
-                            Console.write "Host: trace "
-                            Console.write (Format.int (((renders - markRenders) * 1000) / dt))
-                            Console.write " fps   present "
-                            Console.write (Format.int (((presents - markPresents) * 1000) / dt))
+                        if frames % 120 = 0 && dt > 0 then
+                            let fps = 120000 / dt
+                            fpsMarkMs <- ms
+                            Console.write "Host: ~"
+                            Console.write (Format.int fps)
                             Console.writeln " fps"
-                            markMs <- ms
-                            markRenders <- renders
-                            markPresents <- presents
                         else
                             ()
                     else
                         ()
                 else
-                    ()
+                    running <- false
             else
-                running <- false
+                ()
         else
             ()
 
-    Fidelity.Libc.Memory.free (Some pfdRaw) |> ignore
     Fidelity.Libc.Memory.free (Some frameSlotsRaw) |> ignore
     Fidelity.Libc.Memory.free (Some handlesRaw) |> ignore
     Fidelity.Libc.Memory.free (Some ctxRaw) |> ignore

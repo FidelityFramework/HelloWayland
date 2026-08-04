@@ -30,6 +30,10 @@ let frame (table: int array) (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>
     // outside it is already correct in this buffer.
     let out = NativePtr.ofNativeInt<int32> (mapped + nativeint (Array.get table 16 * stride))
     let n = Array.get table 17 * stridePx
+    // Every pixel is written, which is what clears the previous frame's glyph
+    // from the band. The band lies inside the slot the composition reserves,
+    // so the tracer's background is the same black the chrome sits on and the
+    // two never overlap.
     let mutable i = 0
     while i < n do
         NativePtr.set out i (int32 (Trace.pixel i table n))

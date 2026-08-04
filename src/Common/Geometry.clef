@@ -16,7 +16,8 @@ open Common.Fixed
 // of the shading agree about it — lightAt takes its distance, shadeNormal
 // takes its direction, and neither approximates it as a distant light.
 // Perspective: F8 = 66560, pivot axis PX8 = 17423, camera axis PY8 = 17152,
-// logo-unit -> screen scale K12 = 13759.
+// logo-unit -> screen scale K12, supplied per frame rather than fixed, so
+// the glyph can be sized to the slot the splash composition reserves.
 
 /// Intensity at a point, Q12 (4096 = 1.0). Same law as Gfx3D.Scene.lightAt.
 let lightAt (px8: int) (py8: int) (pz8: int) : int =
@@ -28,21 +29,21 @@ let lightAt (px8: int) (py8: int) (pz8: int) : int =
     i10 * 4
 
 /// Rotate and project one sphere. Returns the Q8 screen x of the centre.
-let projX8 (x8: int) (ct: int) (st: int) (ox8: int) : int =
+let projX8 (x8: int) (ct: int) (st: int) (ox8: int) (k12: int) : int =
     let rx8 = x8 - 17423
     let xr8 = (rx8 * ct) / 4096
     let zr8 = (rx8 * st) / 4096
     let s12 = (66560 * 4096) / (66560 + zr8)
     let px8 = 17423 + (xr8 * s12) / 4096
-    ox8 + (13759 * px8) / 4096
+    ox8 + (k12 * px8) / 4096
 
 /// Q8 screen y of the projected centre.
-let projY8 (x8: int) (y8: int) (st: int) (oy8: int) : int =
+let projY8 (x8: int) (y8: int) (st: int) (oy8: int) (k12: int) : int =
     let rx8 = x8 - 17423
     let zr8 = (rx8 * st) / 4096
     let s12 = (66560 * 4096) / (66560 + zr8)
     let py8 = 17152 + ((y8 - 17152) * s12) / 4096
-    oy8 + (13759 * py8) / 4096
+    oy8 + (k12 * py8) / 4096
 
 /// Rotated centre in LOGO space — what the light law consumes.
 let logoX8 (x8: int) (ct: int) (st: int) : int =
@@ -59,11 +60,11 @@ let logoY8 (x8: int) (y8: int) (st: int) : int =
     17152 + ((y8 - 17152) * s12) / 4096
 
 /// Q8 screen radius after perspective.
-let projR8 (x8: int) (r8: int) (st: int) : int =
+let projR8 (x8: int) (r8: int) (st: int) (k12: int) : int =
     let rx8 = x8 - 17423
     let zr8 = (rx8 * st) / 4096
     let s12 = (66560 * 4096) / (66560 + zr8)
-    (((r8 * 13759) / 4096) * s12) / 4096
+    (((r8 * k12) / 4096) * s12) / 4096
 
 /// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
 let frontZ8 (x8: int) (r8: int) (st: int) : int =
@@ -82,7 +83,7 @@ let frontZ8 (x8: int) (r8: int) (st: int) : int =
 /// divide instead of the two the full normal costs.
 /// rp8 is the SCREEN radius and is used only for the disc test; r8 is the
 /// LOGO radius and is what the depth cap term needs, because z8 is a
-/// logo-space quantity. They differ by 13759/4096 and the perspective
+/// logo-space quantity. They differ by the k12/4096 scale and the perspective
 /// divide, so substituting one for the other exaggerates the pole-to-rim
 /// depth of every sphere — most for the largest ones.
 let hitDepth (pxQ8: int) (pyQ8: int)
