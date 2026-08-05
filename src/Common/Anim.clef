@@ -40,15 +40,15 @@ let boundsOf (samples: nativeptr<int32>) (count: int) (ctx: nativeptr<int32>) (k
     let mutable kMax = 0
     let mutable q = 0
     while q < count do
-        let kq = int (NativePtr.get samples (q * 4 + 3))
+        let kq = int (NativePtr.get samples (q * 6 + 3))
         if kq > kMax then kMax <- kq else ()
         q <- q + 1
     let kPad = kMax / 4
     let mutable k = 0
     while k < count do
-        let x8 = int (NativePtr.get samples (k * 4 + 0))
-        let y8 = int (NativePtr.get samples (k * 4 + 1))
-        let r8 = int (NativePtr.get samples (k * 4 + 2))
+        let x8 = int (NativePtr.get samples (k * 6 + 0))
+        let y8 = int (NativePtr.get samples (k * 6 + 1))
+        let r8 = int (NativePtr.get samples (k * 6 + 2))
         let sx8 = ox8 + (k12 * x8) / 4096
         let sy8 = oy8 + (k12 * y8) / 4096
         let rp8 = ((r8 + kPad) * k12) / 4096

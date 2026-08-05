@@ -72,10 +72,11 @@
 ///   [18] 2^38 / stride        [19] anchor count
 ///   [20] origin x8            [21] origin y8
 ///   [22] max k / 4            [23] segment count
-///   primitive records: 8 ints each
+///   primitive records: 12 ints each
 ///       sx8 sy8 rp8   screen centre and radius — tile binning only
 ///       cx8 cy8 cz8   ROTATED, UNPROJECTED logo centre — the 3D field
 ///       r8  k8        logo radius, fillet radius
+///       nx ny nz s12  body axis (Q12, world) and semi-axis scale along it
 ///   tile offsets:   tilesX*tilesY + 1 prefix sums into the item array
 ///   tile items:     segment indices, grouped by tile
 module Common.Trace
@@ -97,7 +98,7 @@ let private camY () : int = 17152
 
 /// How many ints the shared table needs for a model of `count` points.
 /// One definition, so the host and the device allocator cannot disagree.
-let tableSize (count: int) : int = 24 + count * 8 + (maxTiles () + 1) + count * 64
+let tableSize (count: int) : int = 24 + count * 12 + (maxTiles () + 1) + count * 64
 
 /// Pack the frame description the tracer reads: rotate every primitive
 /// once, then bucket the tube segments into screen tiles. One definition,
@@ -108,7 +109,7 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
               (rx0: int) (ry0: int) (rx1: int) (ry1: int)
               (bandY0: int) (bandRows: int) (nAnchor: int) (k12: int) : unit =
     let recBase = 24
-    let offsetBase = recBase + count * 8
+    let offsetBase = recBase + count * 12
     let itemBase = offsetBase + maxTiles () + 1
     let itemCap = count * 64
     let nSeg = if count > nAnchor then count - nAnchor - 1 else 0
@@ -122,7 +123,7 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     let mutable kMax = 0
     let mutable q = 0
     while q < count do
-        let kq = int (NativePtr.get samples (q * 4 + 3))
+        let kq = int (NativePtr.get samples (q * 6 + 3))
         if kq > kMax then kMax <- kq else ()
         q <- q + 1
     let kPad = kMax / 4
@@ -143,11 +144,11 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     // projection, and it is used for nothing but tile binning.
     let mutable k = 0
     while k < count do
-        let sx = int (NativePtr.get samples (k * 4 + 0))
-        let sy = int (NativePtr.get samples (k * 4 + 1))
-        let sr = int (NativePtr.get samples (k * 4 + 2))
-        let sk = int (NativePtr.get samples (k * 4 + 3))
-        let b = recBase + k * 8
+        let sx = int (NativePtr.get samples (k * 6 + 0))
+        let sy = int (NativePtr.get samples (k * 6 + 1))
+        let sr = int (NativePtr.get samples (k * 6 + 2))
+        let sk = int (NativePtr.get samples (k * 6 + 3))
+        let b = recBase + k * 12
         let rx = sx - camX ()
         Array.set table b (projX8 sx ct st ox8 k12)
         Array.set table (b + 1) (projY8 sx sy st oy8 k12)
@@ -157,6 +158,17 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
         Array.set table (b + 5) ((rx * st) / 4096)
         Array.set table (b + 6) sr
         Array.set table (b + 7) sk
+        // The body's own axis, carried into world space through the same pivot
+        // the positions take. A sphere stores an isotropic scale and the axis
+        // is then irrelevant — the field below degenerates to |p-c|-r exactly.
+        let sc = int (NativePtr.get samples (k * 6 + 4))
+        let tl = int (NativePtr.get samples (k * 6 + 5))
+        let ctT = Fixed.cosSmall12 tl
+        let stT = Fixed.sinSmall12 tl
+        Array.set table (b + 8) ((st * ctT) / 4096)
+        Array.set table (b + 9) stT
+        Array.set table (b + 10) ((ct * ctT) / 4096)
+        Array.set table (b + 11) sc
         k <- k + 1
 
     // Pass 1: how many segments land in each tile. Counts are written one
@@ -170,8 +182,8 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
         t <- t + 1
     let mutable s = 0
     while s < nSeg do
-        let ba = recBase + (nAnchor + s) * 8
-        let bb = ba + 8
+        let ba = recBase + (nAnchor + s) * 12
+        let bb = ba + 12
         let ax = Array.get table ba / 256
         let ay = Array.get table (ba + 1) / 256
         let ar = Array.get table (ba + 2) / 256 + 1
@@ -209,8 +221,8 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
     // Pass 2: scatter, using each start offset as a cursor.
     s <- 0
     while s < nSeg do
-        let ba = recBase + (nAnchor + s) * 8
-        let bb = ba + 8
+        let ba = recBase + (nAnchor + s) * 12
+        let bb = ba + 12
         let ax = Array.get table ba / 256
         let ay = Array.get table (ba + 1) / 256
         let ar = Array.get table (ba + 2) / 256 + 1
@@ -259,18 +271,18 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
         let mutable p = s0 + 1
         while p < e0 do
             let v = Array.get table (itemBase + p)
-            let vb = recBase + (nAnchor + v) * 8
+            let vb = recBase + (nAnchor + v) * 12
             let vz0 = Array.get table (vb + 5) - Array.get table (vb + 6)
-            let vz1 = Array.get table (vb + 13) - Array.get table (vb + 14)
+            let vz1 = Array.get table (vb + 17) - Array.get table (vb + 18)
             let vz = if vz0 < vz1 then vz0 else vz1
             let mutable qq = p
             let mutable sinking = 1
             while sinking = 1 do
                 if qq > s0 then
                     let pv = Array.get table (itemBase + qq - 1)
-                    let pb = recBase + (nAnchor + pv) * 8
+                    let pb = recBase + (nAnchor + pv) * 12
                     let pz0 = Array.get table (pb + 5) - Array.get table (pb + 6)
-                    let pz1 = Array.get table (pb + 13) - Array.get table (pb + 14)
+                    let pz1 = Array.get table (pb + 17) - Array.get table (pb + 18)
                     let pz = if pz0 < pz1 then pz0 else pz1
                     if pz > vz then
                         Array.set table (itemBase + qq) pv
@@ -406,8 +418,8 @@ let pixel (i: int) (data: int array) (n: int) : int =
             let mutable e = 0
             while e < cnt do
                 let b =
-                    if pass = 0 then sb + j * 8
-                    else sb + (nAnchor + (Array.get data (ib + j)) + e) * 8
+                    if pass = 0 then sb + j * 12
+                    else sb + (nAnchor + (Array.get data (ib + j)) + e) * 12
                 let cz = Array.get data (b + 5)
                 let rad = Array.get data (b + 6) + kPad
                 // A primitive cannot be hit nearer than its own front face,
@@ -476,15 +488,15 @@ let pixel (i: int) (data: int array) (n: int) : int =
         let mutable gaz = 4096
         let mutable m = first
         while m < last do
-            let ra = sb + (nAnchor + (Array.get data (ib + m))) * 8
+            let ra = sb + (nAnchor + (Array.get data (ib + m))) * 12
             let ax = Array.get data (ra + 3)
             let ay = Array.get data (ra + 4)
             let az = Array.get data (ra + 5)
             let r1 = Array.get data (ra + 6)
-            let bax = Array.get data (ra + 11) - ax
-            let bay = Array.get data (ra + 12) - ay
-            let baz = Array.get data (ra + 13) - az
-            let rr = Array.get data (ra + 14) - r1
+            let bax = Array.get data (ra + 15) - ax
+            let bay = Array.get data (ra + 16) - ay
+            let baz = Array.get data (ra + 17) - az
+            let rr = Array.get data (ra + 18) - r1
             let l2 = bax * bax + bay * bay + baz * baz
             let pax = px - ax
             let pay = py - ay
@@ -532,18 +544,47 @@ let pixel (i: int) (data: int array) (n: int) : int =
         let mutable kw = 0
         let mutable ai = 0
         while ai < nAnchor do
-            let rc = sb + ai * 8
-            let dqx = px - Array.get data (rc + 3)
-            let dqy = py - Array.get data (rc + 4)
-            let dqz = pz - Array.get data (rc + 5)
-            let dl = Fixed.isqrt (dqx * dqx + dqy * dqy + dqz * dqz)
-            let dv = dl - Array.get data (rc + 6)
+            let rc = sb + ai * 12
+            let vx = px - Array.get data (rc + 3)
+            let vy = py - Array.get data (rc + 4)
+            let vz = pz - Array.get data (rc + 5)
+            let ar = Array.get data (rc + 6)
+            let nx = Array.get data (rc + 8)
+            let ny = Array.get data (rc + 9)
+            let nz = Array.get data (rc + 10)
+            let sc = Array.get data (rc + 11)
+            // An ellipsoid is a sphere under a rotor and a scale: stretch the
+            // component along the body axis by 1/s and the sphere field applies.
+            // f12 = 1/s - 1 in Q12, so f12 = 0 leaves v untouched and the whole
+            // block reduces to |p-c|-r exactly — the isotropic case is not an
+            // approximation of the sphere, it IS the sphere.
+            let f12 = if sc > 0 then (4096 * 4096) / sc - 4096 else 0
+            let vn = (vx * nx + vy * ny + vz * nz) / 4096
+            let sh = (f12 * vn) / 4096
+            let qx = vx + (sh * nx) / 4096
+            let qy = vy + (sh * ny) / 4096
+            let qz = vz + (sh * nz) / 4096
+            let ql = Fixed.isqrt (qx * qx + qy * qy + qz * qz)
+            // scale back by the smallest semi-axis so the result stays a
+            // conservative distance bound, which is what the marcher needs
+            let smin12 = if sc < 4096 then sc else 4096
+            let dv = ((ql - ar) * smin12) / 4096
             if dv < bBest then
                 bBest <- dv
                 kw <- Array.get data (rc + 7)
-                gbx <- if dl > 0 then (dqx * 4096) / dl else 0
-                gby <- if dl > 0 then (dqy * 4096) / dl else 0
-                gbz <- if dl > 0 then (dqz * 4096) / dl else 4096
+                // grad|q| = qhat + (1/s - 1)(qhat . n) n, then renormalised
+                let ux = if ql > 0 then (qx * 4096) / ql else 0
+                let uy = if ql > 0 then (qy * 4096) / ql else 0
+                let uz = if ql > 0 then (qz * 4096) / ql else 4096
+                let un = (ux * nx + uy * ny + uz * nz) / 4096
+                let gs = (f12 * un) / 4096
+                let ex = ux + (gs * nx) / 4096
+                let ey = uy + (gs * ny) / 4096
+                let ez = uz + (gs * nz) / 4096
+                let el = Fixed.isqrt (ex * ex + ey * ey + ez * ez)
+                gbx <- if el > 0 then (ex * 4096) / el else 0
+                gby <- if el > 0 then (ey * 4096) / el else 0
+                gbz <- if el > 0 then (ez * 4096) / el else 4096
             else ()
             ai <- ai + 1
 

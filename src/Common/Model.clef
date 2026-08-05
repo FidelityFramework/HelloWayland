@@ -56,6 +56,20 @@ let filletK () : int = 1800
 /// against them stays exact.
 let discK () : int = 0
 
+/// The anchor's body axis: semi-axis scale along it (Q12, 4096 = isotropic)
+/// and its tilt from the view axis (Q12 radians).
+///
+/// A sphere is invariant under SO(3), so its specular highlight cannot report
+/// rotation — there is nothing to report, and the measured motion is radial to
+/// three significant figures whatever the light does. An ellipsoid is a sphere
+/// under a rotor and a scale; giving the body a frame gives the highlight
+/// something to track. See docs/a-sphere-has-no-orientation.md.
+///
+/// 4096 with any tilt is exactly the sphere case — the general form degenerates
+/// to the old one to 7e-12, so the bulb costs nothing by going through it.
+let anchorScale (i: int) : int = if i = 0 then 4096 else 3482   // bulb sphere, dots 0.85
+let anchorTilt  (i: int) : int = if i = 0 then 0    else 1787   // 0 and 25 degrees, Q12
+
 /// Nudge of the bulb anchor away from chain control point 0, Q8 logo units.
 ///
 /// The bulb is an anchor now, not a chain sample, so its centre is an
@@ -119,8 +133,8 @@ let catmull (p0: int) (p1: int) (p2: int) (p3: int) (t8: int) : int =
     let c = 0 - p0 + 3 * p1 - 3 * p2 + p3
     (2 * p1 * 256 + a * t8 + b * t2 + c * t3) / 512
 
-/// Build the primitive list. samples receives (x8, y8, r8, k8) int32 quads;
-/// capacity 512 quads. Returns the point count (0 on allocation failure).
+/// Build the primitive list. samples receives (x8, y8, r8, k8, scale12, tilt12)
+/// int32 sextuples; capacity 512. Returns the point count (0 on allocation failure).
 ///
 /// Emission order is the group split:
 ///   [0]                    bulb anchor
@@ -168,14 +182,20 @@ let build (samples: nativeptr<int32>) : int =
     NativePtr.set samples 1 (int32 bulbY)
     NativePtr.set samples 2 (NativePtr.get ctrl 2)
     NativePtr.set samples 3 (int32 (filletK ()))
-    NativePtr.set samples 4 (int32 d0x)
-    NativePtr.set samples 5 (int32 d0y)
-    NativePtr.set samples 6 (int32 d0r)
-    NativePtr.set samples 7 (int32 (discK ()))
-    NativePtr.set samples 8 (int32 d1x)
-    NativePtr.set samples 9 (int32 d1y)
-    NativePtr.set samples 10 (int32 d1r)
-    NativePtr.set samples 11 (int32 (discK ()))
+    NativePtr.set samples 4 (int32 (anchorScale 0))
+    NativePtr.set samples 5 (int32 (anchorTilt 0))
+    NativePtr.set samples 6 (int32 d0x)
+    NativePtr.set samples 7 (int32 d0y)
+    NativePtr.set samples 8 (int32 d0r)
+    NativePtr.set samples 9 (int32 (discK ()))
+    NativePtr.set samples 10 (int32 (anchorScale 1))
+    NativePtr.set samples 11 (int32 (anchorTilt 1))
+    NativePtr.set samples 12 (int32 d1x)
+    NativePtr.set samples 13 (int32 d1y)
+    NativePtr.set samples 14 (int32 d1r)
+    NativePtr.set samples 15 (int32 (discK ()))
+    NativePtr.set samples 16 (int32 (anchorScale 2))
+    NativePtr.set samples 17 (int32 (anchorTilt 2))
     count <- anchorCount ()
 
     let mutable i = 0
@@ -213,10 +233,12 @@ let build (samples: nativeptr<int32>) : int =
             let sy = catmull p0y p1y p2y p3y t8
             let sr = Fixed.lerp8 p1r p2r t8
             if count < 508 && containedInBulb sx sy sr bulbX bulbY bulbR = 0 then
-                NativePtr.set samples (count * 4 + 0) (int32 sx)
-                NativePtr.set samples (count * 4 + 1) (int32 sy)
-                NativePtr.set samples (count * 4 + 2) (int32 sr)
-                NativePtr.set samples (count * 4 + 3) (int32 0)
+                NativePtr.set samples (count * 6 + 0) (int32 sx)
+                NativePtr.set samples (count * 6 + 1) (int32 sy)
+                NativePtr.set samples (count * 6 + 2) (int32 sr)
+                NativePtr.set samples (count * 6 + 3) (int32 0)
+                NativePtr.set samples (count * 6 + 4) (int32 4096)
+                NativePtr.set samples (count * 6 + 5) (int32 0)
                 count <- count + 1
             else
                 ()
@@ -224,10 +246,12 @@ let build (samples: nativeptr<int32>) : int =
         i <- i + 1
     // final control point closes the chain at the tail tip
     if nCtrl > 0 && count < 508 then
-        NativePtr.set samples (count * 4 + 0) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 0))
-        NativePtr.set samples (count * 4 + 1) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 1))
-        NativePtr.set samples (count * 4 + 2) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 2))
-        NativePtr.set samples (count * 4 + 3) (int32 0)
+        NativePtr.set samples (count * 6 + 0) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 0))
+        NativePtr.set samples (count * 6 + 1) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 1))
+        NativePtr.set samples (count * 6 + 2) (NativePtr.get ctrl ((nCtrl - 1) * 3 + 2))
+        NativePtr.set samples (count * 6 + 3) (int32 0)
+        NativePtr.set samples (count * 6 + 4) (int32 4096)
+        NativePtr.set samples (count * 6 + 5) (int32 0)
         count <- count + 1
     else
         ()

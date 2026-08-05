@@ -1,7 +1,7 @@
 # A Sphere Has No Orientation
 
-> **Status:** analysis and proposed change. The measurements are real; the change
-> is specified but not implemented. Companion case study to
+> **Status:** implemented and verified in the render — see
+> [Measured in the render](#measured-in-the-render) below. Companion case study to
 > [form-and-integrity.md](./form-and-integrity.md), which argues that branches are
 > often a discretisation of a form not yet found. This is the same argument about
 > a *degree of freedom* not yet represented.
@@ -198,14 +198,63 @@ Contained entirely to the anchor path; the tube and the smooth union are untouch
 - **Storage.** Each anchor gains three semi-axes and a rotor. A sphere stores
   `(r,r,r)` and identity — redundant, and worth it to avoid a second code path.
 
+## Measured in the render
+
+Shipped as an oblate 0.85 with a 25° tilt on both dots, the bulb left isotropic.
+Verified by capturing the running CPU binary and locating, per frame, each body's
+own centre and its specular maximum — both re-found every frame, because the
+bodies move on screen through the sweep. Highlight offset is reported as a
+fraction of the body's own radius, so bodies of different size are comparable.
+
+| body | baseline (all spheres) | with the frame | |
+| --- | --- | --- | --- |
+| **bulb** — isotropic in *both* builds | +14.8% of radius | **+14.0%** | *control* |
+| upper dot | −3.7% | **−16.4%** | 4.4× |
+| lower dot | −2.5% | **−16.8%** | 6.6× |
+
+The bulb is the load-bearing row. It is isotropic in both builds, so it *must*
+return the same number, and it does — 14.8% against 14.0%, inside the noise of
+the circle fit used to find its centre. That is the exactness claim from the
+section above, confirmed on the substrate rather than in the model: a body left
+spherical is still exactly spherical, through the same code path, with no branch
+distinguishing it.
+
+The dots went from tracking at roughly a fifth of the bulb's rate to slightly
+past it. That is the result worth having — not "the highlight moved more" but
+*the small bodies now report rotation at the same rate as the large one*, which
+is what makes them read as belonging to the same object.
+
+The sign differs between bulb and dots. The model is planar, so rotation about
+the vertical axis sends bodies on opposite sides of that axis to opposite-signed
+depth: one advances while the other recedes, and their highlights track in
+opposite directions. That is structural rather than measured — the bulb's fitted
+centre is too noisy to call it confirmed from the render.
+
+### A note on the harness, because it was wrong first
+
+The first version of this measurement captured frames in a tight loop and
+compared the two builds directly. It reported the dots' travel as 9.2 px in one
+build and 23.2 px in the other — a difference that cannot be caused by a shading
+change, since the dots' *positions* are identical in both. The capture loop had
+aliased against the 4 s animation period, so the two builds were sampled over
+different arcs of the same swing. Jittering the capture interval brought both to
+23–24 px and the comparison became meaningful.
+
+The tell was a quantity that was *required to be equal* coming out unequal. That
+is the same role the bulb plays in the table above, and it is worth building such
+a row into a measurement deliberately: a control that must not move is how you
+find out the instrument moved.
+
 ## Open items
 
-- Implement and verify by measuring lateral travel **in the render**, not in the
-  model. The model says 1.40 px; the render is the authority.
-- Decide whether the two dots share a tilt or differ slightly. Identical tilts
-  will move in lockstep, which may read as mechanical.
-- Decide the bulb's frame. Isotropic keeps it pixel-identical to today; a slight
-  flattening would make its highlight track for the same reason the dots' will,
-  though its proximity to the light already dominates the effect there.
+- Decide whether the two dots share a tilt or differ slightly. They currently
+  share 25° and so move in lockstep, which may read as mechanical; the render
+  shows them differing anyway, because they sit at different heights relative to
+  the light.
+- Decide the bulb's frame. Isotropic keeps it pixel-identical, as the control row
+  confirms; a slight flattening would make its highlight track for the same
+  reason the dots' now do, though its proximity to the light already dominates
+  the effect there.
 - Confirm the underestimate from the scaled-sphere bound does not open silhouette
-  artefacts at the fillet, where the anchor group meets the tube.
+  artefacts at the fillet, where the anchor group meets the tube. Nothing visible
+  at the current 1.7×-larger glyph scale, but that is an observation, not a proof.

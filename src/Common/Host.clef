@@ -207,9 +207,9 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     let mutable gy1 = 0 - 2000000000
     let mutable m = 0
     while m < count do
-        let mx8 = int (NativePtr.get samples (m * 4 + 0))
-        let my8 = int (NativePtr.get samples (m * 4 + 1))
-        let mr8 = int (NativePtr.get samples (m * 4 + 2))
+        let mx8 = int (NativePtr.get samples (m * 6 + 0))
+        let my8 = int (NativePtr.get samples (m * 6 + 1))
+        let mr8 = int (NativePtr.get samples (m * 6 + 2))
         if mx8 - mr8 < gx0 then gx0 <- mx8 - mr8 else ()
         if mx8 + mr8 > gx1 then gx1 <- mx8 + mr8 else ()
         if my8 - mr8 < gy0 then gy0 <- my8 - mr8 else ()
@@ -233,19 +233,29 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
     // the two axes to fit rather than crop, and keep a tenth back as margin.
     let splashX = (w - 460) / 2
-    let splashY = (h - 700) / 2
-    // The substrate tag now sits beside the wordmark rather than above the
-    // glyph, so the whole top of the composition is the glyph's again — and
-    // the logo is the thing that should carry it.
-    let slotY = 6
-    let slotW = 460
-    // Bottom at 330, clear of the wordmark's 358. The margin matters because
-    // boundsOf pads the model's box by the perspective sweep (rp8/6 +
-    // dxa8/6) and the tracer paints its background across the whole padded
-    // rect — so a slot that merely fits the glyph still writes black over
-    // type the glyph never reaches. Measured, not guessed: at slot height
-    // 330 the wordmark lost 14 rows, at 314 it lost 3.
-    let slotH = 330
+    // The composition is the glyph's slot stacked on the splash's text block.
+    //
+    // The raster is 460x700 with its top 350 px empty, and that empty band was
+    // the glyph's slot — so the glyph could never be larger than the wordmark's
+    // own scale allowed, because both were measured off the same bitmap.
+    // Anchoring the *text block* instead of the raster decouples them: the slot
+    // grows, the type stays at its native size, and the logo gets bigger
+    // relative to the type rather than in step with it.
+    let textTop = 350
+    let textH = 700 - textTop
+    let slotW = 560
+    let slotH = 560
+    // Clear of the wordmark by more than the tracer's own padding. boundsOf
+    // widens the model's box by the perspective sweep (rp8/6 + dxa8/6) and the
+    // tracer paints its background across the whole padded rect, so a slot that
+    // merely fits the glyph still writes black over type the glyph never
+    // reaches. That pad is a fraction of the glyph, so the gap has to be a
+    // fraction of the slot — a fixed clearance stops working the moment the
+    // slot changes size, which is what made this a measured constant before.
+    let gap = slotH / 10
+    let assemblyH = slotH + gap + textH
+    let assemblyY = Fixed.clamp ((h - assemblyH) / 2) 0 h
+    let splashY = assemblyY + slotH + gap - textTop
     let ext8x = if gx1 > gx0 then gx1 - gx0 else 1
     let ext8y = if gy1 > gy0 then gy1 - gy0 else 1
     let kx = (slotW * 4096 * 256) / ext8x
@@ -254,8 +264,8 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     let k12 = (kFit * 9) / 10
     NativePtr.set ctx 13 (int32 k12)
     // Centre the model's box on the slot's centre, in the splash's frame.
-    let cxPx = splashX + slotW / 2
-    let cyPx = splashY + slotY + slotH / 2
+    let cxPx = w / 2
+    let cyPx = assemblyY + slotH / 2
     NativePtr.set ctx 6 (int32 (cxPx * 256 - (k12 * ((gx0 + gx1) / 2)) / 4096))
     NativePtr.set ctx 7 (int32 (cyPx * 256 - (k12 * ((gy0 + gy1) / 2)) / 4096))
     NativePtr.set ctx 8 (int32 w)
@@ -292,7 +302,8 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     NativePtr.set handles 2 wlBuf0
     NativePtr.set handles 3 wlBuf1
     // Static backdrop, painted once per window size: solid ground with the
-    // splash composited at its natural 460x700 into the middle. The tracer
+    // splash composited at its natural 460x700, its text block anchored under
+    // the glyph's slot. The tracer
     // still owns its band, so this shows through everywhere the glyph's rows
     // are not — which is exactly the seam the next step closes by having
     // Trace.pixel sample this buffer instead of returning a constant.
@@ -306,7 +317,7 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     Compositing.paintSolidColor backdrop w h stride 0 0 0
     if splashPix <> 0n then
         Compositing.compositeOver backdrop w h stride splashPix 460 700
-                                  ((w - 460) / 2) ((h - 700) / 2)
+                                  splashX splashY
     else
         ()
     NativePtr.set handles 4 backdrop
@@ -432,9 +443,9 @@ let run (title: string) : int =
                             460 700 (Fill.plateCss ())
     if splashPix = 0n then Console.writeln "Host: splash rasterize failed (continuing without it)" else ()
 
-    // 508 points x 4 int32 (x, y, r, k) — the quad stride the model writes.
+    // 508 points x 6 int32 (x, y, r, k, scale12, tilt12)
     let samplesRaw =
-        match Fidelity.Libc.Memory.malloc (unativeint 8192) with
+        match Fidelity.Libc.Memory.malloc (unativeint 12288) with
         | Some v -> v
         | None -> 0n
     let fillRaw =
