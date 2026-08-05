@@ -180,6 +180,21 @@ over primitives with known structure — rather than a pile of buffers whose
 shapes and invariants have to be reconstructed at the far end. Exactness upstream
 is what makes the lowering boring, and boring lowerings survive being retargeted.
 
+## A third case, one level along
+
+[a-sphere-has-no-orientation.md](./a-sphere-has-no-orientation.md) records the
+same argument applied to a *degree of freedom* rather than a continuity class.
+The specular highlight on the glyph's two dots does not track the rotation, and
+measurement shows the lighting is correct — the motion is radial to three
+significant figures, and no light placement changes that. The cause is that a
+sphere is invariant under `SO(3)`, so its highlight cannot report rotation: there
+is nothing to report. Giving the body a rotor and a scale — an ellipsoid is a
+sphere under exactly that — converts 0.28 px of lateral sweep into 1.40 px.
+
+Same shape of finding as Exhibit A: the visual defect was a faithful report of
+something missing from the representation, and the fix was to name the structure
+rather than to compensate for its absence.
+
 ## See also
 
 - [pythonic-sidebar/from-impostors-to-envelopes.md](pythonic-sidebar/from-impostors-to-envelopes.md)

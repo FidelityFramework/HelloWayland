@@ -1,0 +1,179 @@
+# A Sphere Has No Orientation
+
+> **Status:** analysis and proposed change. The measurements are real; the change
+> is specified but not implemented. Companion case study to
+> [form-and-integrity.md](./form-and-integrity.md), which argues that branches are
+> often a discretisation of a form not yet found. This is the same argument about
+> a *degree of freedom* not yet represented.
+
+## The observation
+
+The glyph pivots about a vertical axis. Watching it, the specular highlight on the
+swoop tracks convincingly — it slides along the tube as the surface turns through
+the light. The highlight on the two dots does not. It sits there.
+
+The dots are perfect spheres. The swoop is a swept tube. That difference turns out
+to be the entire explanation, and it is not a shading bug.
+
+## First measurement: the highlight is not stuck
+
+Computing where the specular maximum lands on each body across the full ±30°
+sweep, in screen pixels:
+
+| body | radius | highlight travel | as % of radius |
+| --- | --- | --- | --- |
+| bulb | 37.6 px | 6.77 px | 18% |
+| dot (upper) | 20.0 px | 3.50 px | 18% |
+| dot (lower) | 20.0 px | 3.69 px | 18% |
+
+Proportionally **identical**. The lighting maths is correct and the dots are not
+broken; the bulb simply shows twice the absolute travel because it is twice the
+radius. So the naive fix — "the dots' lighting is wrong, correct it" — is
+answering a question that was never asked.
+
+## Second measurement: the motion is radial, and that is why it reads as static
+
+Decomposing the travel into motion *along* the centre-to-highlight line (radial)
+versus *across* the face (lateral):
+
+| body | total | radial | lateral |
+| --- | --- | --- | --- |
+| bulb | 6.77 px | 6.77 | 0.08 |
+| dot (upper) | 3.50 px | 3.49 | 0.28 |
+| dot (lower) | 3.69 px | 3.63 | 0.67 |
+
+The motion is **radial to three significant figures**. A highlight moving toward
+and away from the centre of a disc reads as *brightening and dimming*. A highlight
+moving across the face reads as *travel*. The eye is being shown the first and is
+being asked to perceive the second.
+
+### Why radial, structurally
+
+The specular maximum sits where the surface normal equals the half-vector,
+`H = normalize(L + V)`. The view direction `V` is `(0,0,1)` in the shading frame —
+it has **no screen-plane component**. Therefore
+
+```text
+H_xy  ∥  L_xy          always
+```
+
+The highlight's offset direction on screen is set entirely by the light's
+*screen-plane azimuth*. Nothing else can move it laterally.
+
+Now apply the animation. The pivot is vertical, so every body's `y` is invariant
+through the sweep. The light is static. Therefore `L_y` is invariant, and the
+azimuth `atan2(L_y, L_x)` can only change through `L_x` — which for the dots
+varies by about **1.3°** across the entire animation. That is the 0.28 px.
+
+**This is not tunable.** Testing five light placements — nearer, further, moved
+right, raised, pushed behind — lateral travel never exceeded 0.76 px against 5–9
+px of radial:
+
+| light position | dot lateral | dot radial |
+| --- | --- | --- |
+| current (0, 0, −75) | 0.28 | 3.49 |
+| closer (0, 0, −40) | 0.28 | 4.26 |
+| right + near (180, 0, −40) | 0.15 | 5.56 |
+| high right (156, −31, −55) | 0.26 | 4.99 |
+| far right (234, 8, −30) | 0.03 | 4.94 |
+
+No light position fixes it, because the constraint is not about the light.
+
+## The actual reason
+
+> **A sphere is the one body with no orientation.** Rotating it is the identity
+> map. So it is the one body whose specular highlight cannot report rotation —
+> there is nothing to report.
+
+The swoop tracks because it is a *tube*: its surface normal varies along its
+length, so rotation genuinely sweeps fresh surface through the specular condition.
+Different material arrives at the mirror angle. On a sphere, every orientation is
+the same orientation, and the only thing that can move the highlight is the change
+in light direction — which the geometry above pins to a radial 18%.
+
+The realism gap is therefore **not in the shading model**. It is that the body
+being shaded has a symmetry group large enough to erase the signal.
+
+### The general form
+
+This is worth stating past the immediate case, because it is the reusable part:
+
+> A specular highlight is a **measurement of orientation**, taken by a 2D camera
+> through a light source. What that measurement can return is bounded by the
+> body's own symmetry group. A body invariant under `SO(3)` returns nothing about
+> its rotation, no matter how good the shading model, the light placement, or the
+> arithmetic.
+
+Realism here is not a rendering-quality problem. It is a question of whether the
+representation carries the degree of freedom the image is trying to show.
+
+## The resolution: give the body a rotor
+
+An **ellipsoid is a sphere under a rotor and a scale**. Nothing new enters the
+model — the anchor gains a frame it was previously discarding. And a body with a
+frame has an orientation to report.
+
+Measured, for the upper dot:
+
+| dot shape | total | radial | **lateral** |
+| --- | --- | --- | --- |
+| perfect sphere | 3.50 px | 3.49 | **0.28** |
+| **oblate 0.85, tilt 25°** | 1.40 px | **0.05** | **1.40** |
+| oblate 0.75, tilt 35° | 1.20 px | 0.78 | 0.91 |
+| tri-axial 0.95/0.85/0.75 | 1.19 px | 1.12 | 0.41 |
+
+A **15% flattening with a 25° tilt converts the motion almost entirely to
+lateral** — 1.40 px of sliding against 0.05 px radial. Total travel falls, and
+that is the correct trade: lateral sweep is what the eye reads as tracking, and it
+goes from a rounding error to the dominant component, 5× its previous value.
+
+Note the shape of the result. More flattening is *not* better — 0.75/35° and the
+tri-axial case both return more of the motion to radial. There is a balance point,
+and it is found by measurement rather than by intuition.
+
+## Why this belongs beside the round cone
+
+[form-and-integrity.md](./form-and-integrity.md) argues that the swoop's beading
+was not a shading defect but a *representation* defect: a union of spheres is only
+C⁰, so the normal jumped, and no amount of sampling density fixed it. The cure was
+naming the primitive the model had always been describing — the swept-sphere
+envelope, a round cone.
+
+This is the same argument one level along:
+
+| | beading on the swoop | static highlight on the dots |
+| --- | --- | --- |
+| looked like | a shading artefact | a lighting bug |
+| actually was | a missing continuity — C⁰ where C¹ was needed | a missing degree of freedom — no orientation to report |
+| the wrong fix | denser sampling | move the light, boost the specular |
+| the right fix | the exact envelope (round cone) | give the body a frame (rotor + scale) |
+| cost | *negative* — 3× fewer primitives | one rotor per anchor |
+
+Both times the visual defect was a faithful report of something absent from the
+representation, and both times the fix was to name the structure rather than to
+compensate for its absence.
+
+## What the change costs
+
+Contained entirely to the anchor path; the tube and the smooth union are untouched.
+
+- **Field.** `(|S⁻¹Rᵀ(p − c)| − 1) · min(S)` — the scaled-sphere distance. This is
+  a **conservative bound, not exact**: for a 0.85 axis ratio it underestimates by
+  up to ~15%. Sphere-tracing and the Newton refinement both tolerate an
+  underestimate, but it is a real departure from the current exactness and should
+  be recorded as such rather than glossed.
+- **Normal.** `∝ R S⁻¹u` instead of `(p − c)/|p − c|`. Still closed form; no finite
+  differences, so the analytic-gradient property survives.
+- **Bounds.** Pass-1 ray-sphere radius and the `k/4` fillet pad take the **maximum**
+  semi-axis.
+- **Scope.** The bulb is an anchor too. It currently reads correctly as a sphere,
+  so the proposal applies to the two dots only.
+
+## Open items
+
+- Implement and verify by measuring lateral travel **in the render**, not in the
+  model. The model says 1.40 px; the render is the authority.
+- Decide whether the two dots share a tilt or differ slightly. Identical tilts
+  will move in lockstep, which may read as mechanical.
+- Confirm the underestimate from the scaled-sphere bound does not open silhouette
+  artefacts at the fillet, where the anchor group meets the tube.
