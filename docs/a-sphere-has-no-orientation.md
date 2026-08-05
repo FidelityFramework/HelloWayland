@@ -245,6 +245,13 @@ is the same role the bulb plays in the table above, and it is worth building suc
 a row into a measurement deliberately: a control that must not move is how you
 find out the instrument moved.
 
+## Sequel
+
+Giving the anchors a frame made them report rotation. Giving them a *shadow* made
+them report their neighbours — see
+[shadow-and-substrate.md](./shadow-and-substrate.md), which also records the one
+place the two substrates genuinely diverged, and why it was not in the code.
+
 ## Open items
 
 - Decide whether the two dots share a tilt or differ slightly. They currently

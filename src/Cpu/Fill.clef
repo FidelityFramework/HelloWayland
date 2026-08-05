@@ -20,6 +20,19 @@ let label () : string = "CPU (Common.Trace, walked)"
 /// disagree with the binary because the binary is what selects.
 let plateCss () : string = "#tag-gpu,#drv-gpu-1,#drv-gpu-2{display:none}"
 
+/// Shadow march steps.
+///
+/// NOT a quality dial, and not a guess. The march is a sphere trace, so it
+/// converges: past a certain count more steps cannot change the image. Measured
+/// against a 64-step reference, the deviation falls under 1/255 at 12 steps and
+/// to zero by 24, so 16 is converged with margin.
+///
+/// It is therefore the same number on every substrate, because a shorter march
+/// is not a cheaper rendering of the same picture — it is a different picture.
+/// The silicon's capability shows up where it belongs, in the frame rate: the
+/// identical 16 steps run at ~180 fps on gfx1151 and ~6 fps on one CPU core.
+let shadowSteps () : int = 16
+
 /// The CPU writes pixels itself, so the shell must map the buffer object.
 let wantsCpuMapping () : int = 1
 

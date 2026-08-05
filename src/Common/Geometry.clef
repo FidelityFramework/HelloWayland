@@ -61,8 +61,18 @@ let projR8 (x8: int) (r8: int) (st: int) (k12: int) : int =
 /// sphere's own normal there puts a crease along every intersection
 /// circle — visible as ridging along the swoop and as a hard lens-shaped
 /// seam where the chain enters the ball.
+/// `sh12` is the fraction of the key light reaching this point (Q12): 4096
+/// fully lit, 0 fully occluded. It attenuates the DIRECTIONAL terms only.
+///
+/// A specular highlight is a mirror image of the source, so a point that
+/// cannot see the source has no highlight — not a dimmed one, none. Scaling
+/// the finished colour instead leaves a saturated glint at whatever the
+/// ambient floor is (here 737/4096, which passes a 255 highlight through at
+/// 76) and the body reads as lit from inside its own shadow. The ambient
+/// term is the one thing that survives, because it is by definition the
+/// light that did not come from the source.
 let shadeNormal (nx: int) (ny: int) (nz: int)
-                (lx8: int) (ly8: int) (pz8: int) : int =
+                (lx8: int) (ly8: int) (pz8: int) (sh12: int) : int =
     // Direction to the light, per shaded point. This used to be two frozen
     // constants — (-1562,-1726,3370) and (-818,-904,3910) — which are
     // exactly the light and half vectors for the point source at logo
@@ -108,8 +118,10 @@ let shadeNormal (nx: int) (ny: int) (nz: int)
     // across a wide patch, which reads as a washed-out translucency rather
     // than a polished surface.
     let spec = (p64 * p8v) / 4096
-    let lit = 737 + (3359 * ndl) / 4096
-    let glint = (216 * ((3400 * spec) / 4096)) / 4096
+    // 737 is the ambient floor and is NOT shadowed; 3359*ndl is the key
+    // light's diffuse share and is. The specular is extinguished outright.
+    let lit = 737 + (3359 * ((ndl * sh12) / 4096)) / 4096
+    let glint = (216 * ((3400 * ((spec * sh12) / 4096)) / 4096)) / 4096
     let inten = lightAt lx8 ly8 pz8
     // Base albedo, Braidpoint orange #ec6911 (236, 105, 17).
     //

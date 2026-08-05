@@ -72,6 +72,8 @@
 ///   [18] 2^38 / stride        [19] anchor count
 ///   [20] origin x8            [21] origin y8
 ///   [22] max k / 4            [23] segment count
+///   [24] shadow steps         [25] shadow list base
+///   [26] shadow list stride   [27..31] spare
 ///   primitive records: 12 ints each
 ///       sx8 sy8 rp8   screen centre and radius — tile binning only
 ///       cx8 cy8 cz8   ROTATED, UNPROJECTED logo centre — the 3D field
@@ -79,6 +81,8 @@
 ///       nx ny nz s12  body axis (Q12, world) and semi-axis scale along it
 ///   tile offsets:   tilesX*tilesY + 1 prefix sums into the item array
 ///   tile items:     segment indices, grouped by tile
+///   shadow lists:   per anchor, a count then the segment indices that can
+///                   stand between that anchor and the light
 module Common.Trace
 
 open Common.Fixed
@@ -88,6 +92,23 @@ open Common.Geometry
 /// at any window size, and the tile arrays can be sized once.
 let private maxTiles () : int = 4096
 
+/// Header ints. Was 24 and exactly full; the shadow pass needs three more
+/// (step budget, list base, list stride) and round numbers are cheaper to
+/// reason about than tight ones when a layout changes again.
+let private hdrSize () : int = 32
+
+/// Per-anchor shadow candidate capacity, and the anchor ceiling the table is
+/// sized for. A candidate list is the tube segments that can stand between one
+/// anchor and the light — the light-space analogue of a screen tile, built by
+/// the same observe-once rule.
+let private shadowCap () : int = 48
+let private maxAnchors () : int = 8
+
+/// The point light, Q8 logo units. Geometry.shadeNormal places it at logo
+/// (0, 0, -75) and this must be the same source, or a point could be shaded as
+/// lit by one light and occluded from another.
+let private lightZ () : int = 0 - 19200
+
 /// Camera and glyph axes in Q8 logo units. The eye sits at (PX, PY, -F)
 /// looking down +z, and the projection plane is z = 0 — which is exactly
 /// the perspective the projX8/projY8 divide already implements, so screen
@@ -96,9 +117,39 @@ let private camF () : int = 66560
 let private camX () : int = 17423
 let private camY () : int = 17152
 
+/// Round-cone distance, value only.
+///
+/// The tracer's inner loop derives this alongside the gradient it also needs,
+/// so it keeps its own copy; the shadow march wants the scalar and nothing
+/// else. Same law and the same degenerate-taper fallback: when |dr| >= |b-a|
+/// the swept envelope is just the larger endpoint sphere and the tangent
+/// construction has no real root.
+let private coneDist (px: int) (py: int) (pz: int)
+                     (ax: int) (ay: int) (az: int) (r1: int)
+                     (bax: int) (bay: int) (baz: int) (rr: int) : int =
+    let l2 = bax * bax + bay * bay + baz * baz
+    let pax = px - ax
+    let pay = py - ay
+    let paz = pz - az
+    let yv = pax * bax + pay * bay + paz * baz
+    let pa2 = pax * pax + pay * pay + paz * paz
+    let aq = l2 - rr * rr
+    let xq = l2 * pa2 - yv * yv
+    let sq = if aq > 0 then (if xq > 0 then Fixed.isqrt (xq / aq) else 0) else 0
+    let u0 =
+        if aq > 0 then (if l2 > 0 then ((yv + rr * sq) * 4096) / l2 else 0)
+        else (if rr > 0 then 4096 else 0)
+    let u = Fixed.clamp u0 0 4096
+    let dqx = px - (ax + (u * bax) / 4096)
+    let dqy = py - (ay + (u * bay) / 4096)
+    let dqz = pz - (az + (u * baz) / 4096)
+    Fixed.isqrt (dqx * dqx + dqy * dqy + dqz * dqz) - (r1 + (u * rr) / 4096)
+
 /// How many ints the shared table needs for a model of `count` points.
 /// One definition, so the host and the device allocator cannot disagree.
-let tableSize (count: int) : int = 24 + count * 12 + (maxTiles () + 1) + count * 64
+let tableSize (count: int) : int =
+    hdrSize () + count * 12 + (maxTiles () + 1) + count * 64
+    + maxAnchors () * (shadowCap () + 1)
 
 /// Pack the frame description the tracer reads: rotate every primitive
 /// once, then bucket the tube segments into screen tiles. One definition,
@@ -107,10 +158,18 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
               (stridePx: int) (h: int) (ox8: int) (oy8: int)
               (ct: int) (st: int) (w: int)
               (rx0: int) (ry0: int) (rx1: int) (ry1: int)
-              (bandY0: int) (bandRows: int) (nAnchor: int) (k12: int) : unit =
-    let recBase = 24
+              (bandY0: int) (bandRows: int) (nAnchor: int) (k12: int)
+              (shadowSteps: int) : unit =
+    let recBase = hdrSize ()
     let offsetBase = recBase + count * 12
-    let itemBase = offsetBase + maxTiles () + 1
+    // The shadow lists sit BEFORE the item array, not after it. The GPU
+    // uploads `used length` (slot 15) rather than the whole table, and that
+    // watermark ends at itemBase + used — so anything past the item region is
+    // never copied to the device. Placed after the items these lists reached
+    // the CPU and not the kernel, which read zeros and skipped every march:
+    // one binary with shadows, one without, from identical source.
+    let shadowBase = offsetBase + maxTiles () + 1
+    let itemBase = shadowBase + maxAnchors () * (shadowCap () + 1)
     let itemCap = count * 64
     let nSeg = if count > nAnchor then count - nAnchor - 1 else 0
 
@@ -170,6 +229,92 @@ let fillTable (table: int array) (samples: nativeptr<int32>) (count: int)
         Array.set table (b + 10) ((ct * ctT) / 4096)
         Array.set table (b + 11) sc
         k <- k + 1
+
+    // --- light-space candidate lists, one per anchor --------------------
+    //
+    // The screen tiles below answer "which segments can this pixel see". The
+    // same question with the eye replaced by the light answers "which segments
+    // can shadow this anchor", and it is worth answering once per frame rather
+    // than once per shaded point — the anchors are three fixed bodies, so the
+    // whole structure is three short lists and it is built by the same
+    // observe-once rule the tile grid is.
+    //
+    // The frustum from a sphere of radius R to a point light is a cone that
+    // narrows to nothing at the light, so a CYLINDER of radius R about the
+    // same axis contains it. That makes the test one dot product and one
+    // comparison per segment, and conservative everywhere rather than only
+    // near the anchor.
+    Array.set table 24 shadowSteps
+    Array.set table 25 shadowBase
+    Array.set table 26 (shadowCap () + 1)
+    let mutable an = 0
+    while an < nAnchor do
+        let ab = recBase + an * 12
+        let acx = Array.get table (ab + 3)
+        let acy = Array.get table (ab + 4)
+        let acz = Array.get table (ab + 5)
+        let acr = Array.get table (ab + 6)
+        let hx = 0 - acx
+        let hy = 0 - acy
+        let hz = lightZ () - acz
+        let hl = Fixed.isqrt (hx * hx + hy * hy + hz * hz)
+        let ux = if hl > 0 then (hx * 4096) / hl else 0
+        let uy = if hl > 0 then (hy * 4096) / hl else 0
+        let uz = if hl > 0 then (hz * 4096) / hl else 0 - 4096
+        let lb = shadowBase + an * (shadowCap () + 1)
+        let mutable nc = 0
+        let mutable sg = 0
+        while sg < nSeg do
+            let eb = recBase + (nAnchor + sg) * 12
+            let e0x = Array.get table (eb + 3)
+            let e0y = Array.get table (eb + 4)
+            let e0z = Array.get table (eb + 5)
+            let r0 = Array.get table (eb + 6)
+            let e1x = Array.get table (eb + 15)
+            let e1y = Array.get table (eb + 16)
+            let e1z = Array.get table (eb + 17)
+            let r1s = Array.get table (eb + 18)
+            let mx = (e0x + e1x) / 2
+            let my = (e0y + e1y) / 2
+            let mz = (e0z + e1z) / 2
+            let hdx = (e1x - e0x) / 2
+            let hdy = (e1y - e0y) / 2
+            let hdz = (e1z - e0z) / 2
+            let mr = Fixed.isqrt (hdx * hdx + hdy * hdy + hdz * hdz)
+                     + (if r0 > r1s then r0 else r1s)
+            // A body is not shadowed by geometry it is FUSED to. The chain's
+            // first spans sit up to 30 logo units INSIDE the bulb, so counting
+            // them as occluders makes the join shadow itself — a hard crease
+            // across the bulb, and static at every pivot angle, because it was
+            // never a cast shadow. Overlapping within the fillet radius means
+            // one surface, and a surface casts no shadow on itself. Measured:
+            // this drops 38 of 121 segments for the bulb and none at all for
+            // the dots, whose eclipse is unchanged to the digit.
+            let ak = Array.get table (ab + 7)
+            let g0x = e0x - acx
+            let g0y = e0y - acy
+            let g0z = e0z - acz
+            let g1x = e1x - acx
+            let g1y = e1y - acy
+            let g1z = e1z - acz
+            let gp0 = Fixed.isqrt (g0x * g0x + g0y * g0y + g0z * g0z) - r0 - acr
+            let gp1 = Fixed.isqrt (g1x * g1x + g1y * g1y + g1z * g1z) - r1s - acr
+            let gap = if gp0 < gp1 then gp0 else gp1
+            let wx = mx - acx
+            let wy = my - acy
+            let wz = mz - acz
+            let pr = (wx * ux + wy * uy + wz * uz) / 4096
+            if gap > ak && pr > 0 && pr < hl && nc < shadowCap () then
+                let perp2 = wx * wx + wy * wy + wz * wz - pr * pr
+                let lim = acr + mr
+                if perp2 < lim * lim then
+                    Array.set table (lb + 1 + nc) sg
+                    nc <- nc + 1
+                else ()
+            else ()
+            sg <- sg + 1
+        Array.set table lb nc
+        an <- an + 1
 
     // Pass 1: how many segments land in each tile. Counts are written one
     // slot high so the prefix sum below turns them into start offsets in
@@ -460,6 +605,12 @@ let pixel (i: int) (data: int array) (n: int) : int =
     // all: the loop refines t on the first two and keeps the third's
     // gradient.
     let mutable t = tBest
+    // Which anchor owns the point, and how much of it the anchor owns.
+    // The shadow march needs both: the first picks the candidate list, the
+    // second fades the result out across the fillet into the tube, which
+    // does not receive at this budget.
+    let mutable awOut = 0
+    let mutable hvOut = 4096
     let mutable fval = 0
     let mutable fgx = 0
     let mutable fgy = 0
@@ -542,6 +693,7 @@ let pixel (i: int) (data: int array) (n: int) : int =
         let mutable gby = 0
         let mutable gbz = 4096
         let mutable kw = 0
+        let mutable aw = 0
         let mutable ai = 0
         while ai < nAnchor do
             let rc = sb + ai * 12
@@ -572,6 +724,7 @@ let pixel (i: int) (data: int array) (n: int) : int =
             if dv < bBest then
                 bBest <- dv
                 kw <- Array.get data (rc + 7)
+                aw <- ai
                 // grad|q| = qhat + (1/s - 1)(qhat . n) n, then renormalised
                 let ux = if ql > 0 then (qx * 4096) / ql else 0
                 let uy = if ql > 0 then (qy * 4096) / ql else 0
@@ -595,6 +748,8 @@ let pixel (i: int) (data: int array) (n: int) : int =
         let hv =
             if kw > 0 then Fixed.clamp (2048 + (2048 * (bBest - aBest)) / kw) 0 4096
             else (if aBest < bBest then 4096 else 0)
+        hvOut <- hv
+        awOut <- aw
         fval <- Fixed.smin aBest bBest kw
         fgx <- (hv * gax + (4096 - hv) * gbx) / 4096
         fgy <- (hv * gay + (4096 - hv) * gby) / 4096
@@ -641,7 +796,66 @@ let pixel (i: int) (data: int array) (n: int) : int =
     // The field's gradient points out of the solid, so at the front surface
     // it points back toward the eye at -z. shadeNormal's convention is the
     // opposite: nz > 0 faces the viewer.
-    let c = shadeNormal sx sy (0 - sz) pxp pyp pzp
+    // --- shadow -------------------------------------------------------
+    //
+    // March toward the light over this anchor's candidate list. Same field,
+    // same primitives, same arithmetic as the primary ray — the only thing
+    // the substrate chooses is how many steps it can afford, read from the
+    // table. The CPU marches coarse and the GPU marches fine; neither has a
+    // different shading model, which is the property worth keeping.
+    //
+    // Penumbra comes free: the running minimum of d/t over the march is the
+    // half-angle the occluder subtends from the point, so the same loop that
+    // answers "is it blocked" also answers "by how much".
+    let stepsB = Array.get data 24
+    let mutable sfac = 4096
+    if stepsB > 0 && hvOut < 4096 then
+        let lb = Array.get data 25 + awOut * Array.get data 26
+        let nc = Array.get data lb
+        let tox = 0 - pxp
+        let toy = 0 - pyp
+        let toz = lightZ () - pzp
+        let tl = Fixed.isqrt (tox * tox + toy * toy + toz * toz)
+        let sdx = if tl > 0 then (tox * 4096) / tl else 0
+        let sdy = if tl > 0 then (toy * 4096) / tl else 0
+        let sdz = if tl > 0 then (toz * 4096) / tl else 0 - 4096
+        // Start off the surface by more than the field's own tolerance, or
+        // the point shadows itself and every lit body turns black.
+        let mutable ts = 64
+        let mutable st = 0
+        while st < stepsB && sfac > 0 && ts < tl do
+            let qx = pxp + (ts * sdx) / 4096
+            let qy = pyp + (ts * sdy) / 4096
+            let qz = pzp + (ts * sdz) / 4096
+            let mutable dmin = 1073741824
+            let mutable ci = 0
+            while ci < nc do
+                let sgi = Array.get data (lb + 1 + ci)
+                let eb = sb + (nAnchor + sgi) * 12
+                let eax = Array.get data (eb + 3)
+                let eay = Array.get data (eb + 4)
+                let eaz = Array.get data (eb + 5)
+                let er0 = Array.get data (eb + 6)
+                let dc = coneDist qx qy qz eax eay eaz er0
+                                  (Array.get data (eb + 15) - eax)
+                                  (Array.get data (eb + 16) - eay)
+                                  (Array.get data (eb + 17) - eaz)
+                                  (er0 - Array.get data (eb + 18))
+                if dc < dmin then dmin <- dc else ()
+                ci <- ci + 1
+            if dmin < 16 then sfac <- 0
+            else
+                let rat = (dmin * 8 * 4096) / ts
+                if rat < sfac then sfac <- rat else ()
+                ts <- ts + dmin
+            st <- st + 1
+    else ()
+    // Only the anchor's share of the point is shadowed, so where the tube
+    // owns it the factor is 1 and the fillet fades between the two. The
+    // ambient floor lives in shadeNormal, which is the only place that knows
+    // which part of the colour came from the key light.
+    let eff = 4096 - ((4096 - hvOut) * (4096 - sfac)) / 4096
+    let c = shadeNormal sx sy (0 - sz) pxp pyp pzp eff
     // shadeNormal packs 0xRRGGBB; the surface wants ABGR8888 (byte 0 = R)
     let r = c / 65536
     let g = (c / 256) % 256

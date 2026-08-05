@@ -17,7 +17,7 @@ let main _ =
     let b = Geometry.projY8 9830 9830 0 31359 13759
     let c = Geometry.projR8 9830 4237 0 13759
     let e = Geometry.lightAt 9830 9830 0
-    let s = Geometry.shadeNormal 1000 1000 3900 a b c
+    let s = Geometry.shadeNormal 1000 1000 3900 a b c 4096
     let tbl = Array.zeroCreate<int> 16
     Array.set tbl 0 4
     let g = Kernel.kernel 0 tbl 4

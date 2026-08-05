@@ -377,6 +377,7 @@ let renderInto (bo: nativeint)
                     (int (NativePtr.get ctx 2)) (int (NativePtr.get ctx 3))
                     bandY0 bandRows (Model.anchorCount ())
                     (int (NativePtr.get ctx 13))
+                    (Fill.shadowSteps ())
     if Fill.wantsCpuMapping () = 0 then
         // The substrate addresses the buffer itself; mapping it here would
         // stage a CPU copy over the top of the device's own writes.
