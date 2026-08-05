@@ -45,58 +45,12 @@ let projY8 (x8: int) (y8: int) (st: int) (oy8: int) (k12: int) : int =
     let py8 = 17152 + ((y8 - 17152) * s12) / 4096
     oy8 + (k12 * py8) / 4096
 
-/// Rotated centre in LOGO space — what the light law consumes.
-let logoX8 (x8: int) (ct: int) (st: int) : int =
-    let rx8 = x8 - 17423
-    let xr8 = (rx8 * ct) / 4096
-    let zr8 = (rx8 * st) / 4096
-    let s12 = (66560 * 4096) / (66560 + zr8)
-    17423 + (xr8 * s12) / 4096
-
-let logoY8 (x8: int) (y8: int) (st: int) : int =
-    let rx8 = x8 - 17423
-    let zr8 = (rx8 * st) / 4096
-    let s12 = (66560 * 4096) / (66560 + zr8)
-    17152 + ((y8 - 17152) * s12) / 4096
-
 /// Q8 screen radius after perspective.
 let projR8 (x8: int) (r8: int) (st: int) (k12: int) : int =
     let rx8 = x8 - 17423
     let zr8 = (rx8 * st) / 4096
     let s12 = (66560 * 4096) / (66560 + zr8)
     (((r8 * k12) / 4096) * s12) / 4096
-
-/// Depth of the sphere's front surface in Q8 logo units (smaller = nearer).
-let frontZ8 (x8: int) (r8: int) (st: int) : int =
-    let rx8 = x8 - 17423
-    (rx8 * st) / 4096 - r8
-
-/// Depth of a projected sphere at pixel (pxQ8, pyQ8): the biased Q8 depth
-/// of the front surface there, or 0 for a miss. Biased positive so the
-/// caller can just take the minimum.
-///
-/// This is deliberately separate from shading. A pixel on the glyph is
-/// covered by a dozen or more spheres of the swept chain, and only one of
-/// them is visible, so depth is what the loop needs and colour is what the
-/// winner needs — computing both per candidate would shade the same pixel
-/// a dozen times over. Only nz is needed here, and it comes from one
-/// divide instead of the two the full normal costs.
-/// rp8 is the SCREEN radius and is used only for the disc test; r8 is the
-/// LOGO radius and is what the depth cap term needs, because z8 is a
-/// logo-space quantity. They differ by the k12/4096 scale and the perspective
-/// divide, so substituting one for the other exaggerates the pole-to-rim
-/// depth of every sphere — most for the largest ones.
-let hitDepth (pxQ8: int) (pyQ8: int)
-             (cx8: int) (cy8: int) (rp8: int) (r8: int) (z8: int) : int =
-    let dx8 = pxQ8 - cx8
-    let dy8 = pyQ8 - cy8
-    let d2 = dx8 * dx8 + dy8 * dy8
-    let r2 = rp8 * rp8
-    if d2 > r2 then 0
-    else
-    let nz2 = if r2 > 0 then 16777216 - (d2 * 16777216) / r2 else 16777216
-    let nz = if nz2 > 0 then Fixed.isqrt nz2 else 0
-    z8 + r8 - (r8 * nz) / 4096 + 1048576
 
 /// Colour for a surface whose normal is (nx, ny, nz) in Q12, lit at the
 /// logo-space position (lx8, ly8, pz8). Packed 0xRRGGBB.
@@ -174,26 +128,3 @@ let shadeNormal (nx: int) (ny: int) (nz: int)
     let cg = Fixed.clamp (((( 61 * lit) / 4096 + glint) * inten) / 4096) 0 255
     let cb = Fixed.clamp (((( 10 * lit) / 4096 + glint) * inten) / 4096) 0 255
     cr * 65536 + cg * 256 + cb
-
-/// Kernel entry — the contract the GPU backend leg dispatches over.
-///   i    = global index (pixel number, row-major)
-///   data = shared read-only table every thread may index freely
-///   n    = size of the output domain (w * h)
-///
-/// The leg generates the gpu.func wrapper that supplies the index and the
-/// buffers and stores the result; everything between is ordinary Clef. A
-/// Clef `int array` parameter lowers to `memref<?xi64>`, so the wrapper
-/// hands its own memref straight through — no pointer, no cast, and the
-/// extent travels with the value.
-///
-/// Table layout (all Q8 unless noted):
-///   [0] window width      [1] window height    [2] sphere count
-///   [3] cos(theta) Q12    [4] sin(theta) Q12
-///   [5] origin x8         [6] origin y8        [7] background 0xRRGGBB
-///   [8..] sphere triples: x8, y8, r8
-///
-/// This is the gather the CPU renderer cannot afford: every pixel sweeps
-/// every sphere and keeps the nearest surface, which yields a true surface
-/// normal rather than a per-impostor one — so the seam where the swoop
-/// meets the bulb does not exist here.
-

@@ -151,7 +151,6 @@ let private closeIf (fd: int) : unit =
 /// glyph origin, zbuf stride, and clip rect. Returns 0 on success.
 let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativeint)
                      (samples: nativeptr<int32>) (count: int)
-                     (strideStorage: nativeint) (mapDataStorage: nativeint)
                      (ctx: nativeptr<int32>) (handles: nativeptr<nativeint>)
                      (w: int) (h: int) : int =
     // tear down the previous size, if any
@@ -172,25 +171,21 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     let bo1 = Graphics.allocateRgbaBuffer device w h
     if bo0 = 0n || bo1 = 0n then 1
     else
-    // learn the CPU-map stride (may exceed w*4) from a first map of each bo
-    NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
-    let mapped0 = Graphics.mapBufferWrite bo0 w h strideStorage mapDataStorage
-    if mapped0 = 0n then 1
-    else
-    let stride = int (NativePtr.read (NativePtr.ofNativeInt<uint32> strideStorage))
-    let mapData0 = NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage)
-    Graphics.unmapBuffer bo0 mapData0
-    NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
-    let mapped1 = Graphics.mapBufferWrite bo1 w h strideStorage mapDataStorage
-    if mapped1 = 0n then 1
-    else
-    let stride1 = int (NativePtr.read (NativePtr.ofNativeInt<uint32> strideStorage))
-    let mapData1 = NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage)
-    Graphics.unmapBuffer bo1 mapData1
-    if stride1 <> stride then
+    // Learn the CPU-map stride (may exceed w*4) from a first map of each bo.
+    // Both buffers must agree, because the tracer is handed one stride.
+    match Graphics.mapBufferForWrite bo0 w h with
+    | None -> 1
+    | Some m0 ->
+    Graphics.unmapBuffer bo0 m0.MapData
+    match Graphics.mapBufferForWrite bo1 w h with
+    | None -> 1
+    | Some m1 ->
+    Graphics.unmapBuffer bo1 m1.MapData
+    if m0.Stride <> m1.Stride then
         Console.writeln "Host: swapchain buffers map with different strides"
         1
     else
+    let stride = m0.Stride
 
     // Window-size context. Where the glyph sits and how far it reaches are
     // properties of the model and the window, not of the substrate, so the
@@ -330,12 +325,11 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
     let mutable seed = 0
     while seed < 2 do
         let sbo = if seed = 0 then bo0 else bo1
-        NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
-        let sm = Graphics.mapBufferWrite sbo w h strideStorage mapDataStorage
-        if sm <> 0n then
-            Fidelity.Libc.Memory.memcpy (Some sm) (Some backdrop) (unativeint backdropBytes) |> ignore
-            Graphics.unmapBuffer sbo (NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage))
-        else ()
+        match Graphics.mapBufferForWrite sbo w h with
+        | Some sm ->
+            Fidelity.Libc.Memory.memcpy (Some sm.Mapped) (Some backdrop) (unativeint backdropBytes) |> ignore
+            Graphics.unmapBuffer sbo sm.MapData
+        | None -> ()
         seed <- seed + 1
     NativePtr.set handles 6 (nativeint stride)
     NativePtr.set handles 7 (nativeint fd0)
@@ -348,7 +342,7 @@ let rebuildSwapchain (splashPix: nativeint) (device: nativeint) (dmabuf: nativei
 
 /// Map the back buffer, let the substrate paint it, unmap.
 /// The shell never touches a pixel.
-let renderInto (bo: nativeint) (strideStorage: nativeint) (mapDataStorage: nativeint)
+let renderInto (bo: nativeint)
                (handles: nativeptr<nativeint>)
                (samples: nativeptr<int32>) (count: int) (table: int array)
                (ctx: nativeptr<int32>) (theta12: int) : int =
@@ -379,16 +373,14 @@ let renderInto (bo: nativeint) (strideStorage: nativeint) (mapDataStorage: nativ
                    (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12))
                    0n stride
     else
-    // gbm_bo_map requires *map_data == NULL on entry (Mesa contract)
-    NativePtr.write (NativePtr.ofNativeInt<nativeint> mapDataStorage) 0n
-    let mapped = Graphics.mapBufferWrite bo w h strideStorage mapDataStorage
-    if mapped = 0n then 1
-    else
+    match Graphics.mapBufferForWrite bo w h with
+    | None -> 1
+    | Some mb ->
+    let mapped = mb.Mapped
     let rc = Fill.frame table ctx
                  (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12))
                  mapped stride
-    let mapData = NativePtr.read (NativePtr.ofNativeInt<nativeint> mapDataStorage)
-    Graphics.unmapBuffer bo mapData
+    Graphics.unmapBuffer bo mb.MapData
     rc
 
 /// Run the animated splash: responsive window, +-30 deg pivot with a 2 s
@@ -433,14 +425,6 @@ let run (title: string) : int =
     | Some surface ->
 
     // static allocations shared across window sizes
-    let strideStorage =
-        match Fidelity.Libc.Memory.malloc (unativeint 4) with
-        | Some v -> v
-        | None -> 0n
-    let mapDataStorage =
-        match Fidelity.Libc.Memory.malloc (unativeint 8) with
-        | Some v -> v
-        | None -> 0n
     // One rasterization for the life of the process, at the composition's
     // natural 460x700. Absolute path for now: the binary runs from targets/.
     let splashPix =
@@ -469,7 +453,7 @@ let run (title: string) : int =
         match Fidelity.Libc.Memory.malloc (unativeint 8) with
         | Some v -> v
         | None -> 0n
-    if strideStorage = 0n || mapDataStorage = 0n || samplesRaw = 0n || fillRaw = 0n
+    if samplesRaw = 0n || fillRaw = 0n
        || ctxRaw = 0n || handlesRaw = 0n || frameSlotsRaw = 0n then 1
     else
     let _ = Fidelity.Libc.Memory.memset (Some fillRaw) 0 (unativeint 256)
@@ -498,7 +482,7 @@ let run (title: string) : int =
 
     NativePtr.set handles 12 fillRaw
     if rebuildSwapchain splashPix device dmabuf samples count
-                        strideStorage mapDataStorage ctx handles curW curH <> 0 then 1
+                        ctx handles curW curH <> 0 then 1
     else
     Console.write "Host: window "
     Console.write (Format.int curW)
@@ -508,7 +492,7 @@ let run (title: string) : int =
     let frameListener = buildWlCallbackListener "Common.Host.frameDone"
 
     // frame 0: draw, request the frame callback BEFORE the commit
-    if renderInto (NativePtr.get handles 0) strideStorage mapDataStorage handles
+    if renderInto (NativePtr.get handles 0) handles
                   samples count table ctx (Anim.angleAt 1000) <> 0 then 1
     else
     match wl_surface_frame surface with
@@ -567,7 +551,7 @@ let run (title: string) : int =
                 curH <- newH
                 resized <- true
                 if rebuildSwapchain splashPix device dmabuf samples count
-                                    strideStorage mapDataStorage ctx handles curW curH <> 0 then
+                                    ctx handles curW curH <> 0 then
                     running <- false
                 else
                     front <- 0
@@ -583,7 +567,7 @@ let run (title: string) : int =
                 NativePtr.set handles 13 (nativeint back)
                 let bo = if back = 0 then NativePtr.get handles 0 else NativePtr.get handles 1
                 let wlBuf = if back = 0 then NativePtr.get handles 2 else NativePtr.get handles 3
-                if renderInto bo strideStorage mapDataStorage handles
+                if renderInto bo handles
                               samples count table ctx theta = 0 then
                     match wl_surface_frame surface with
                     | Some cb ->
@@ -628,8 +612,6 @@ let run (title: string) : int =
     Fidelity.Libc.Memory.free (Some ctxRaw) |> ignore
     Fidelity.Libc.Memory.free (Some fillRaw) |> ignore
     Fidelity.Libc.Memory.free (Some samplesRaw) |> ignore
-    Fidelity.Libc.Memory.free (Some strideStorage) |> ignore
-    Fidelity.Libc.Memory.free (Some mapDataStorage) |> ignore
     Fidelity.Libc.Memory.free (Some stateRaw) |> ignore
     Fidelity.Libc.Memory.free (Some globalsRaw) |> ignore
     Connection.disconnect disp
