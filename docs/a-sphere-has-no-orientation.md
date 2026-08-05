@@ -153,21 +153,50 @@ Both times the visual defect was a faithful report of something absent from the
 representation, and both times the fix was to name the structure rather than to
 compensate for its absence.
 
+## The generalisation is uniform, not a special case
+
+The tempting move is to apply this to the two dots and leave the bulb a sphere,
+since the bulb reads correctly already. That would be a per-object special case,
+and it is the wrong instinct for the same reason the rest of this argument gives:
+**one correct formulation beats two treatments that happen to agree.**
+
+The right form is that *every* anchor carries a frame — semi-axes and a rotor —
+and a sphere is the case where the scale is isotropic. This costs nothing,
+because the general form degenerates exactly:
+
+| axis ratio | worst underestimate vs true distance | median |
+| --- | --- | --- |
+| **1.00 (sphere)** | **0.0%** | **0.0%** |
+| 0.95 | 5.0% | 3.6% |
+| 0.85 | 15.0% | 9.9% |
+| 0.75 | 24.9% | 14.3% |
+
+Verified directly against the sphere path over 20,000 random points: with
+isotropic scale and identity rotor the distance agrees to 7×10⁻¹² and the normal
+to 3×10⁻¹⁶ — floating-point noise. **The ellipsoid form *is* the sphere form when
+the scale is isotropic**, not an approximation of it.
+
+So exactness is lost only where anisotropy is deliberately used. A body left
+spherical stays exactly spherical, through the same code path, with no branch
+distinguishing it. The bulb may therefore keep an isotropic frame and be pixel-
+identical to today, while the model as a whole is correct in general rather than
+correct by exception.
+
 ## What the change costs
 
 Contained entirely to the anchor path; the tube and the smooth union are untouched.
 
-- **Field.** `(|S⁻¹Rᵀ(p − c)| − 1) · min(S)` — the scaled-sphere distance. This is
-  a **conservative bound, not exact**: for a 0.85 axis ratio it underestimates by
-  up to ~15%. Sphere-tracing and the Newton refinement both tolerate an
-  underestimate, but it is a real departure from the current exactness and should
-  be recorded as such rather than glossed.
+- **Field.** `(|S⁻¹Rᵀ(p − c)| − 1) · min(S)` — the scaled-sphere distance. A
+  **conservative lower bound** in the anisotropic case, exact in the isotropic
+  one (table above). Sphere-tracing and the Newton refinement both tolerate an
+  underestimate; the departure from exactness is real but scoped to bodies that
+  actually use a non-uniform scale.
 - **Normal.** `∝ R S⁻¹u` instead of `(p − c)/|p − c|`. Still closed form; no finite
   differences, so the analytic-gradient property survives.
 - **Bounds.** Pass-1 ray-sphere radius and the `k/4` fillet pad take the **maximum**
   semi-axis.
-- **Scope.** The bulb is an anchor too. It currently reads correctly as a sphere,
-  so the proposal applies to the two dots only.
+- **Storage.** Each anchor gains three semi-axes and a rotor. A sphere stores
+  `(r,r,r)` and identity — redundant, and worth it to avoid a second code path.
 
 ## Open items
 
@@ -175,5 +204,8 @@ Contained entirely to the anchor path; the tube and the smooth union are untouch
   model. The model says 1.40 px; the render is the authority.
 - Decide whether the two dots share a tilt or differ slightly. Identical tilts
   will move in lockstep, which may read as mechanical.
+- Decide the bulb's frame. Isotropic keeps it pixel-identical to today; a slight
+  flattening would make its highlight track for the same reason the dots' will,
+  though its proximity to the light already dominates the effect there.
 - Confirm the underestimate from the scaled-sphere bound does not open silhouette
   artefacts at the fillet, where the anchor group meets the tube.
