@@ -1,0 +1,58 @@
+/// The existing splash alpha calculation over a bounded ABGR pixel destination.
+module CpuComposition
+
+open BAREWire.Platform
+
+/// Logical words have ABGR8888 value order. Their representation at a mapped
+/// destination belongs to its declared pixel layout, not this calculation.
+let private rgba (r: int) (g: int) (b: int) : int =
+    4278190080 + r + g * 256 + b * 65536
+
+/// The store operation reports zero on success. It may write an ordinary array
+/// or a borrowed native view; this calculation never constructs an address.
+let seedWithStore (capacity: int) (store: int -> int -> int)
+                  (width: int) (height: int) (stridePixels: int)
+                  (splash: int array) (splashX: int) (splashY: int) : int =
+    if width <= 0 || height <= 0 || stridePixels < width
+       || not (DispatchRegions.fitsByteLength capacity height stridePixels)
+       || not (DispatchRegions.contains (Array.length splash) 0 (460 * 700 * 4)) then 22
+    else
+    let mutable result = 0
+    let mutable y = 0
+    while y < height && result = 0 do
+        let mutable x = 0
+        while x < stridePixels && result = 0 do
+            result <- store (y * stridePixels + x) 4278190080
+            x <- x + 1
+        y <- y + 1
+    let mutable sy = 0
+    while sy < 700 && result = 0 do
+        let dy = splashY + sy
+        if dy >= 0 && dy < height then
+            let mutable sx = 0
+            while sx < 460 && result = 0 do
+                let dx = splashX + sx
+                if dx >= 0 && dx < width then
+                    let src = (sy * 460 + sx) * 4
+                    let sa = Array.get splash (src + 3) &&& 255
+                    if sa > 0 then
+                        let sr = Array.get splash src &&& 255
+                        let sg = Array.get splash (src + 1) &&& 255
+                        let sb = Array.get splash (src + 2) &&& 255
+                        // Preserve Platform.Display.Compositing's equation.
+                        // The destination was seeded black immediately above.
+                        let r = if sa = 255 then sr else sr * sa / 255
+                        let g = if sa = 255 then sg else sg * sa / 255
+                        let b = if sa = 255 then sb else sb * sa / 255
+                        result <- store (dy * stridePixels + dx) (rgba r g b)
+                    else ()
+                else ()
+                sx <- sx + 1
+        else ()
+        sy <- sy + 1
+    result
+
+let seed (pixels: int array) (width: int) (height: int) (stridePixels: int)
+         (splash: int array) (splashX: int) (splashY: int) : int =
+    let store = fun index value -> Array.set pixels index value; 0
+    seedWithStore (Array.length pixels) store width height stridePixels splash splashX splashY

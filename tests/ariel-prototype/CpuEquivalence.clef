@@ -1,0 +1,100 @@
+/// EXPERIMENTAL: not an accepted native gate. This preserved harness and its
+/// Fill implementation use the removed NativePtr/nativeint pointer surface.
+///
+/// Display-independent acceptance: the real Common.Trace calculation, padded
+/// mappings, zero/tail bands, repeated dispatches, controlled carrier counts and
+/// input/extent rejection. A failing region never reaches presentation.
+module CpuEquivalence
+
+let private check (condition: bool) (name: string) : int =
+    if condition then 0
+    else
+        Console.write "FAIL "
+        Console.writeln name
+        1
+
+let private same (first: nativeptr<int32>) (second: nativeptr<int32>) (count: int) : bool =
+    let mutable agrees = true
+    let mutable i = 0
+    while i < count do
+        if NativePtr.get first i <> NativePtr.get second i then agrees <- false else ()
+        i <- i + 1
+    agrees
+
+let private runCase (samples: nativeptr<int32>) (modelCount: int) (fill: nativeptr<nativeint>)
+                    (width: int) (height: int) (stridePx: int)
+                    (bandY: int) (bandRows: int) (angle: int) : int =
+    let allocationElements = stridePx * height
+    let serial = NativePtr.stackalloc<int32> allocationElements
+    let concurrentPixels = NativePtr.stackalloc<int32> allocationElements
+    let ctx = NativePtr.stackalloc<int32> 16
+    let table = Array.zeroCreate<int> (Common.Trace.tableSize modelCount)
+    let mutable i = 0
+    while i < allocationElements do
+        NativePtr.set serial i (int32 324508639)
+        NativePtr.set concurrentPixels i (int32 324508639)
+        i <- i + 1
+    let pixelBytes = int (NativePtr.toNativeInt (NativePtr.add (NativePtr.ofNativeInt<int32> 0n) 1))
+    let strideBytes = stridePx * pixelBytes
+    let configured = Fill.resize samples modelCount ctx fill width height strideBytes
+    if configured <> 0 then check false "configure persistent CPU fill"
+    else
+    Common.Trace.fillTable table samples modelCount stridePx height
+        (width * 128) (height * 128)
+        (Common.Fixed.cosSmall12 angle) (Common.Fixed.sinSmall12 angle) width
+        0 0 width height bandY bandRows (Common.Model.anchorCount ()) 1024 (Fill.shadowSteps ())
+    let count = bandRows * stridePx
+    i <- 0
+    while i < count do
+        NativePtr.set serial (bandY * stridePx + i) (int32 (Common.Trace.pixel i table count))
+        i <- i + 1
+    let rendered = Fill.frameMapped table fill (NativePtr.toNativeInt concurrentPixels) strideBytes height
+    let mutable failed = check (rendered = 0) "parallel frame return"
+    failed <- failed + check (same serial concurrentPixels allocationElements) "serial/parallel frame bytes including untouched rows"
+    // Reuse the same pool and mapping with another generation and identical
+    // inputs. This must not inherit an old cursor or a delayed completion.
+    let repeated = Fill.frameMapped table fill (NativePtr.toNativeInt concurrentPixels) strideBytes height
+    failed <- failed + check (repeated = 0 && same serial concurrentPixels allocationElements) "repeated region bytes"
+    // Historical transport regression: preserve the direct/header prefix but
+    // omit candidate lists and the rest of the complete allocated input.
+    let prefix = Array.sub table 0 32
+    let truncated = Fill.frameMapped prefix fill (NativePtr.toNativeInt concurrentPixels) strideBytes height
+    failed <- failed + check (truncated <> 0 && same serial concurrentPixels allocationElements) "truncated indirect input rejected before dispatch"
+    Array.set table 17 (height + 1)
+    let oversized = Fill.frameMapped table fill (NativePtr.toNativeInt concurrentPixels) strideBytes height
+    failed <- failed + check (oversized <> 0 && same serial concurrentPixels allocationElements) "out-of-mapping band rejected before dispatch"
+    failed
+
+let private runCarriers (samples: nativeptr<int32>) (modelCount: int) (carriers: int) : int =
+    let fill = NativePtr.stackalloc<nativeint> 32
+    let mutable i = 0
+    while i < 32 do
+        NativePtr.set fill i 0n
+        i <- i + 1
+    let started = Fill.startWithCarriers fill carriers
+    if started <> 0 then check false "start requested carriers"
+    else
+    let mutable failed = 0
+    failed <- failed + runCase samples modelCount fill 32 24 32 0 24 0
+    failed <- failed + runCase samples modelCount fill 37 29 40 3 17 1072
+    failed <- failed + runCase samples modelCount fill 48 31 51 1 29 (0 - 1072)
+    failed <- failed + runCase samples modelCount fill 160 192 163 0 192 2145
+    failed <- failed + runCase samples modelCount fill 19 11 23 11 0 0
+    let stopped = Fill.shutdown fill
+    failed <- failed + check (stopped = 0 && NativePtr.get fill 0 = 0n) "shutdown joins carriers"
+    failed <- failed + check (Fill.shutdown fill = 0) "repeated shutdown"
+    failed
+
+[<EntryPoint>]
+let main _ =
+    // Same bounded model allocation used by the host, with compiler-scaled
+    // int32 elements. The model builder writes at most 508 six-field samples.
+    let samples = NativePtr.stackalloc<int32> 3072
+    let modelCount = Common.Model.build samples
+    if modelCount <= 0 then check false "model build"
+    else
+    let mutable failed = runCarriers samples modelCount 1
+    failed <- failed + runCarriers samples modelCount 2
+    failed <- failed + runCarriers samples modelCount 4
+    if failed = 0 then Console.writeln "CPU serial/Ariel equivalence: passed" else ()
+    if failed = 0 then 0 else 1

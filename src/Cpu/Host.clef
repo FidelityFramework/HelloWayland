@@ -1,0 +1,320 @@
+/// Animated CPU presentation directly into scoped, typed GBM mappings.
+module CpuHost
+
+open BAREWire.Platform
+open Fidelity.GBM.Native
+open Fidelity.GBM.Native.Types
+open Fidelity.Image.Resvg.Native
+open Fidelity.Image.Resvg.Native.Types
+open Common.Fixed
+
+// Preserve the existing host's supported window dimensions. Each native map
+// supplies its actual bounded pixel extent and row stride.
+let private maximumDimension = 4096
+let private objects: option<CHandle<gbm_bo>> array = Array.zeroCreate 4
+let private fds: int array = Array.zeroCreate 4
+// 0 empty, 1 active, 2 awaiting compositor release after a resize.
+let private slotStates: int array = Array.zeroCreate 4
+// Static splash content is initialized independently in each native buffer.
+let private seeded: int array = Array.zeroCreate 4
+
+let private digit (value: int) : string =
+    if value = 0 then "0"
+    elif value = 1 then "1"
+    elif value = 2 then "2"
+    elif value = 3 then "3"
+    elif value = 4 then "4"
+    elif value = 5 then "5"
+    elif value = 6 then "6"
+    elif value = 7 then "7"
+    elif value = 8 then "8"
+    else "9"
+
+let private writeNumber (value: int) : unit =
+    if value >= 1000 then Console.write (digit ((value / 1000) % 10)) else ()
+    if value >= 100 then Console.write (digit ((value / 100) % 10)) else ()
+    if value >= 10 then Console.write (digit ((value / 10) % 10)) else ()
+    Console.write (digit (value % 10))
+
+let private splash () : option<int array> =
+    match resvg_options_create () with
+    | None -> None
+    | Some options ->
+    resvg_options_load_system_fonts options
+    resvg_options_set_stylesheet options "#tag-gpu,#drv-gpu-1,#drv-gpu-2{display:none}"
+    let treeOut: option<CHandle<resvg_render_tree>> array = Array.zeroCreate 1
+    let parsed = resvg_parse_tree_from_file "/home/hhh/repos/HelloWayland/assets/splash_noglyph.svg" options treeOut
+    let result =
+        if parsed <> 0 then None
+        else
+        match Array.get treeOut 0 with
+        | None -> None
+        | Some tree ->
+            // The generated Unsigned8 foreign projection settles packed RGBA
+            // byte storage. No source-level pointer or numeric cast is used.
+            let pixels: int array = Array.zeroCreate (460 * 700 * 4)
+            let identity: resvg_transform = { a = 1.0; b = 0.0; c = 0.0; d = 1.0; e = 0.0; f = 0.0 }
+            resvg_render tree identity 460 700 pixels
+            resvg_tree_destroy tree
+            Some pixels
+    resvg_options_destroy options
+    result
+
+let private releaseSlot (slot: int) : unit =
+    CpuWindow.destroyBuffer slot
+    match Array.get objects slot with
+    | Some bo -> gbm_bo_destroy bo; Array.set objects slot None
+    | None -> ()
+    let fd = Array.get fds slot
+    if fd >= 0 then Fidelity.Display.Native.close fd |> ignore else ()
+    Array.set fds slot (0 - 1)
+    Array.set slotStates slot 0
+    Array.set seeded slot 0
+
+let private collectReleased () : unit =
+    let mutable slot = 0
+    while slot < 4 do
+        if Array.get slotStates slot = 2 && CpuWindow.available slot then releaseSlot slot else ()
+        slot <- slot + 1
+
+/// The generated scope owns native out-parameters and unmaps after this
+/// nonescaping callback returns. No map handle is retained by application state.
+let private measureStride (bo: CHandle<gbm_bo>) (width: int) (height: int) : int =
+    withMappedPixels bo 0 0 width height 2 (fun view -> BorrowedView.stride view)
+
+let private allocateSlot (window: CpuWindow.Window) (device: CHandle<gbm_device>)
+                         (slot: int) (width: int) (height: int) : int =
+    // ABGR8888 and rendering | linear preserve the existing scanout format.
+    match gbm_bo_create device width height 0x34324241 0x14 with
+    | None -> 0
+    | Some bo ->
+    Array.set objects slot (Some bo)
+    Array.set seeded slot 0
+    let stride = measureStride bo width height
+    let fd = gbm_bo_get_fd bo
+    Array.set fds slot fd
+    if stride <= 0 || fd < 0
+       || CpuWindow.createBuffer window slot fd width height (gbm_bo_get_stride bo) (gbm_bo_get_format bo) <> 0 then
+        releaseSlot slot
+        0
+    else stride
+
+/// A replacement pair is installed before old busy buffers are reclaimed.
+/// metadata: active slots [0..1], width/height [2..3], mapped stride [4].
+let private resize (window: CpuWindow.Window) (device: CHandle<gbm_device>)
+                   (samples: int array) (count: int) (ctx: int array)
+                   (metadata: int array) (width: int) (height: int) : int =
+    collectReleased ()
+    let mutable first = 0 - 1
+    let mutable second = 0 - 1
+    let mutable slot = 0
+    while slot < 4 do
+        if Array.get slotStates slot = 0 then
+            if first < 0 then first <- slot
+            elif second < 0 then second <- slot
+            else ()
+        else ()
+        slot <- slot + 1
+    if second < 0 then 16
+    else
+    let stride0 = allocateSlot window device first width height
+    let stride1 = allocateSlot window device second width height
+    if stride0 <= 0 || stride0 <> stride1 || stride0 % 4 <> 0
+       || stride0 / 4 < width then
+        releaseSlot first
+        releaseSlot second
+        22
+    else
+        CpuLayout.configure samples count ctx width height
+        slot <- 0
+        while slot < 4 do
+            if Array.get slotStates slot = 1 then Array.set slotStates slot 2 else ()
+            slot <- slot + 1
+        Array.set slotStates first 1
+        Array.set slotStates second 1
+        Array.set metadata 0 first
+        Array.set metadata 1 second
+        Array.set metadata 2 width
+        Array.set metadata 3 height
+        Array.set metadata 4 stride0
+        Console.write "CPU-HelloWayland: window "
+        writeNumber width
+        Console.write "x"
+        writeNumber height
+        Console.writeln ""
+        0
+
+/// Region.run retires all participant accesses before the mapping callback
+/// returns. Only then may withMappedPixels unmap, and the caller present.
+let private draw (slot: int) (metadata: int array) (samples: int array) (count: int)
+                 (ctx: int array) (table: int array) (requiredTableElements: int)
+                 (splashPixels: int array) (theta: int) : int =
+    let width = Array.get metadata 2
+    let height = Array.get metadata 3
+    let expectedStride = Array.get metadata 4
+    if not (CpuWindow.available slot)
+       || width <= 0 || width > maximumDimension || height <= 0 || height > maximumDimension
+       || expectedStride <= 0 || expectedStride % 4 <> 0 || expectedStride / 4 < width then 22
+    else
+    CpuLayout.fillTable samples count table ctx (expectedStride / 4) theta
+    match Array.get objects slot with
+    | None -> 22
+    | Some bo ->
+        // Preserve the seeded chrome outside the glyph band when the native
+        // owner creates a new mapping. The callback still has write-only rights.
+        withMappedPixels bo 0 0 width height 3 (fun view ->
+            let stride = BorrowedView.stride view
+            let capacity = BorrowedView.length view
+            if stride <> expectedStride || stride <= 0 || stride % 4 <> 0
+               || not (DispatchRegions.fitsByteLength capacity height (stride / 4)) then 22
+            else
+                let mutable initialized = 0
+                if Array.get seeded slot = 0 then
+                    let store = fun index value -> BorrowedView.set view index value; 0
+                    initialized <- CpuComposition.seedWithStore capacity store width height (stride / 4)
+                                       splashPixels (Array.get ctx 14) (Array.get ctx 15)
+                    if initialized = 0 then Array.set seeded slot 1 else ()
+                else ()
+                if initialized <> 0 then initialized
+                else MappedFill.render table requiredTableElements view height 256)
+
+let private animate (window: CpuWindow.Window) (device: CHandle<gbm_device>)
+                    (splashPixels: int array) : int =
+    let samples: int array = Array.zeroCreate 3072
+    let count = Common.Model.build samples
+    let required = Common.Trace.tableSize count
+    let table: int array = Array.zeroCreate required
+    let ctx: int array = Array.zeroCreate 16
+    let metadata: int array = Array.zeroCreate 5
+    let mutable slot = 0
+    while slot < 4 do
+        Array.set fds slot (0 - 1)
+        slot <- slot + 1
+    let carriers = Fidelity.Ariel.Region.allowedCarrierCount ()
+    let started = Fidelity.Ariel.Region.start carriers
+    let mutable result = started
+    if started = 0 then
+        Console.write "CPU-HelloWayland: pthread carriers="
+        writeNumber carriers
+        Console.writeln " (including caller)"
+        let initialW = CpuWindow.configuredWidth ()
+        let initialH = CpuWindow.configuredHeight ()
+        let width = if initialW > 0 then Common.Fixed.clamp initialW 480 maximumDimension else 750
+        let height = if initialH > 0 then Common.Fixed.clamp initialH 720 maximumDimension else 900
+        result <- resize window device samples count ctx metadata width height
+        let mutable front = Array.get metadata 0
+        if result = 0 then
+            result <- draw front metadata samples count ctx table required splashPixels (Common.Anim.angleAt 1000)
+            if result = 0 then result <- CpuWindow.present window front 0 0 width height else ()
+        else ()
+        let mutable latched = false
+        let mutable firstMs = 0
+        let mutable frames = 0
+        let mutable fpsMarkMs = 0
+        let mutable running = result = 0
+        if running then Console.writeln "CPU-HelloWayland: animated frame loop" else ()
+        while running do
+            let dispatched = Fidelity.Wayland.Core.wl_display_dispatch window.Display
+            if dispatched < 0 then result <- 1; running <- false
+            elif CpuWindow.closed () then running <- false
+            else
+                collectReleased ()
+                if CpuWindow.frameReady () then
+                    let rawMs = CpuWindow.frameTime ()
+                    let ms = if rawMs < 0 then rawMs + 65536 * 65536 else rawMs
+                    if not latched then
+                        latched <- true
+                        firstMs <- ms
+                        fpsMarkMs <- ms
+                    else ()
+                    let delta = ms - firstMs
+                    let elapsed = if delta < 0 then delta + 65536 * 65536 else delta
+                    let oldW = Array.get metadata 2
+                    let oldH = Array.get metadata 3
+                    let configuredW = CpuWindow.configuredWidth ()
+                    let configuredH = CpuWindow.configuredHeight ()
+                    let newW = if configuredW > 0 then Common.Fixed.clamp configuredW 480 maximumDimension else oldW
+                    let newH = if configuredH > 0 then Common.Fixed.clamp configuredH 720 maximumDimension else oldH
+                    let mutable changed = false
+                    if newW <> oldW || newH <> oldH then
+                        let changedResult = resize window device samples count ctx metadata newW newH
+                        // Keep presenting the current size while an older pair
+                        // retires; retaining a pending configure must not block
+                        // the commits which let a compositor release it.
+                        if changedResult = 16 then ()
+                        elif changedResult <> 0 then result <- changedResult; running <- false
+                        else changed <- true
+                    else ()
+                    if running then
+                        let first = Array.get metadata 0
+                        let second = Array.get metadata 1
+                        let preferred = if front = first then second else first
+                        let other = if preferred = first then second else first
+                        let back = if CpuWindow.available preferred then preferred
+                                   elif CpuWindow.available other then other else (0 - 1)
+                        if back >= 0 then
+                            let theta = Common.Anim.angleAt (elapsed + 1000)
+                            result <- draw back metadata samples count ctx table required splashPixels theta
+                            if result = 0 then
+                                if changed then result <- CpuWindow.present window back 0 0 newW newH
+                                else result <- CpuWindow.present window back
+                                                   (Array.get ctx 0) (Array.get ctx 1)
+                                                   (Array.get ctx 2 - Array.get ctx 0)
+                                                   (Array.get ctx 3 - Array.get ctx 1)
+                            else ()
+                            if result <> 0 then running <- false
+                            else
+                                front <- back
+                                frames <- frames + 1
+                                let fpsDelta = ms - fpsMarkMs
+                                let dt = if fpsDelta < 0 then fpsDelta + 65536 * 65536 else fpsDelta
+                                if frames % 120 = 0 && dt > 0 then
+                                    Console.write "CPU-HelloWayland: ~"
+                                    writeNumber (120000 / dt)
+                                    Console.writeln " fps"
+                                    fpsMarkMs <- ms
+                                else ()
+                        else ()
+                    else ()
+                else ()
+        let joined = Fidelity.Ariel.Region.stop ()
+        if result = 0 then result <- joined else ()
+        if joined = 0 then Console.writeln "CPU-HelloWayland: carriers joined"
+        else Console.errorln "CPU-HelloWayland: carrier join failed"
+    else ()
+    // Disconnect retires compositor ownership before native storage is freed.
+    CpuWindow.close window
+    slot <- 0
+    while slot < 4 do
+        releaseSlot slot
+        slot <- slot + 1
+    result
+
+let run (title: string) : int =
+    let fd = Fidelity.Display.Native.openRenderNode "/dev/dri/renderD128"
+    if fd < 0 then 1
+    else
+    match gbm_create_device fd with
+    | None -> Fidelity.Display.Native.close fd |> ignore; 1
+    | Some device ->
+    let result =
+        match Fidelity.Pthread.Storage.mallocContext 1 with
+        | None -> 1
+        | Some context ->
+            let connected = CpuWindow.connect title context
+            let outcome =
+                match connected with
+                | None -> Console.errorln "CPU-HelloWayland: display connection failed"; 1
+                | Some window ->
+                    match splash () with
+                    | None ->
+                        Console.errorln "CPU-HelloWayland: splash rasterization failed"
+                        CpuWindow.close window
+                        1
+                    | Some splashPixels -> animate window device splashPixels
+            Fidelity.Pthread.Storage.freeContext context
+            Fidelity.Wayland.Bridge.ProtocolInterfaces.shutdown ()
+            outcome
+    gbm_device_destroy device
+    Fidelity.Display.Native.close fd |> ignore
+    result

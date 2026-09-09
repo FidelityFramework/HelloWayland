@@ -1,0 +1,88 @@
+/// A native CPU carrier rendering of the actual logo, emitted as a PPM image.
+/// The Wayland host's foreign mapping migration is a separate integration gate.
+module CpuCarrierDemo
+
+let private digit (value: int) : string =
+    if value = 0 then "0"
+    elif value = 1 then "1"
+    elif value = 2 then "2"
+    elif value = 3 then "3"
+    elif value = 4 then "4"
+    elif value = 5 then "5"
+    elif value = 6 then "6"
+    elif value = 7 then "7"
+    elif value = 8 then "8"
+    else "9"
+
+let private writeChannel (value: int) : unit =
+    Console.write (digit (value / 100))
+    Console.write (digit ((value / 10) % 10))
+    Console.write (digit (value % 10))
+    Console.write " "
+
+/// Fit and center the glyph from its actual model bounds, as the host does.
+let private prepare (samples: int array) (count: int) (table: int array)
+                    (width: int) (height: int) : unit =
+    let mutable gx0 = 2000000000
+    let mutable gx1 = 0 - 2000000000
+    let mutable gy0 = 2000000000
+    let mutable gy1 = 0 - 2000000000
+    let mutable m = 0
+    while m < count do
+        let x = Array.get samples (m * 6)
+        let y = Array.get samples (m * 6 + 1)
+        let radius = Array.get samples (m * 6 + 2)
+        if x - radius < gx0 then gx0 <- x - radius else ()
+        if x + radius > gx1 then gx1 <- x + radius else ()
+        if y - radius < gy0 then gy0 <- y - radius else ()
+        if y + radius > gy1 then gy1 <- y + radius else ()
+        m <- m + 1
+    let extentX = if gx1 > gx0 then gx1 - gx0 else 1
+    let extentY = if gy1 > gy0 then gy1 - gy0 else 1
+    let scaleX = (width * 4096 * 256) / extentX
+    let scaleY = (height * 4096 * 256) / extentY
+    let fit = if scaleX < scaleY then scaleX else scaleY
+    let scale = fit * 9 / 10
+    let originX = width * 128 - (scale * ((gx0 + gx1) / 2)) / 4096
+    let originY = height * 128 - (scale * ((gy0 + gy1) / 2)) / 4096
+    Common.Trace.fillTable table samples count width height originX originY
+        (Common.Fixed.cosSmall12 1072) (Common.Fixed.sinSmall12 1072)
+        width 0 0 width height 0 height (Common.Model.anchorCount ()) scale 16
+
+[<EntryPoint>]
+let main _ =
+    let width = 192
+    let height = 224
+    let samples = Array.zeroCreate<int> 3072
+    let count = Common.Model.build samples
+    if count <= 3 then
+        Console.errorln "CPU carrier demo: model construction failed"
+        1
+    else
+        let requiredTableElements = Common.Trace.tableSize count
+        let table = Array.zeroCreate<int> requiredTableElements
+        let pixels = Array.zeroCreate<int> (width * height)
+        prepare samples count table width height
+        let started = Fidelity.Ariel.Region.startAllowed ()
+        if started <> 0 then
+            Console.errorln "CPU carrier demo: carrier startup failed"
+            started
+        else
+            let rendered = TypedFill.frame table requiredTableElements pixels width height 256
+            let joined = Fidelity.Ariel.Region.stop ()
+            if rendered <> 0 || joined <> 0 then
+                Console.errorln "CPU carrier demo: rendering or carrier join failed"
+                if rendered <> 0 then rendered else joined
+            else
+                // Only a completed, joined image reaches the output stream.
+                Console.write "P3\n# HelloWayland CPU carriers, Common.Trace\n192 224\n255\n"
+                let mutable i = 0
+                while i < width * height do
+                    let pixel = Array.get pixels i
+                    // Trace returns ABGR8888: red is the low byte.
+                    writeChannel (pixel &&& 255)
+                    writeChannel ((pixel >>> 8) &&& 255)
+                    writeChannel ((pixel >>> 16) &&& 255)
+                    Console.write "\n"
+                    i <- i + 1
+                0

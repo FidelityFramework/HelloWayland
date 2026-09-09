@@ -1,0 +1,105 @@
+/// Window composition preserves the shared host's model-derived layout.
+module CpuLayout
+
+open Common.Fixed
+open Common.Anim
+
+/// Context keeps the same scalar slots consumed by the shared tracing table.
+/// The splash raster remains 460x700, with its text block below the glyph.
+let configure (samples: int array) (count: int) (ctx: int array) (w: int) (h: int) : unit =
+    Array.set ctx 4 w
+    Array.set ctx 5 h
+    // Centre the glyph from the model's own extent. This used to be a
+    // literal 460x700 pixel box with two Q8 nudges, measured off one
+    // particular build — so it drifted the moment the model changed, and
+    // the model has since changed shape twice (the tube became cone
+    // endpoints, and the samples fully contained in the bulb were dropped).
+    // Deriving the box means the glyph stays centred whatever the chain
+    // does next.
+    let mutable gx0 = 2000000000
+    let mutable gx1 = 0 - 2000000000
+    let mutable gy0 = 2000000000
+    let mutable gy1 = 0 - 2000000000
+    let mutable m = 0
+    while m < count do
+        let mx8 = (Array.get samples (m * 6 + 0))
+        let my8 = (Array.get samples (m * 6 + 1))
+        let mr8 = (Array.get samples (m * 6 + 2))
+        if mx8 - mr8 < gx0 then gx0 <- mx8 - mr8 else ()
+        if mx8 + mr8 > gx1 then gx1 <- mx8 + mr8 else ()
+        if my8 - mr8 < gy0 then gy0 <- my8 - mr8 else ()
+        if my8 + mr8 > gy1 then gy1 <- my8 + mr8 else ()
+        m <- m + 1
+    // Size and place the glyph inside the slot the splash reserves for it.
+    //
+    // The composition is 460x700 and holds the wordmark at y~355-465 and the
+    // spec panel at y~485-665, so everything above y~350 is the glyph's. The
+    // scale used to be the constant 13759/4096, which rendered the model at a
+    // fixed 401x441 px whatever the window did — taller than the 330 px slot,
+    // which is why the glyph overran the composition instead of sitting in it.
+    //
+    // screen_px = k12 * logoQ8 / (4096 * 256), so the k12 that makes the model
+    // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
+    // the two axes to fit rather than crop, and keep a tenth back as margin.
+    // The composition is 460x700 and holds the wordmark at y~355-465 and the
+    // spec panel at y~485-665, so everything above y~350 is the glyph's.
+    //
+    // screen_px = k12 * logoQ8 / (4096 * 256), so the k12 that makes the model
+    // exactly fill a span is span * 4096 * 256 / extent; take the smaller of
+    // the two axes to fit rather than crop, and keep a tenth back as margin.
+    let splashX = (w - 460) / 2
+    // The composition is the glyph's slot stacked on the splash's text block.
+    //
+    // The raster is 460x700 with its top 350 px empty, and that empty band was
+    // the glyph's slot — so the glyph could never be larger than the wordmark's
+    // own scale allowed, because both were measured off the same bitmap.
+    // Anchoring the *text block* instead of the raster decouples them: the slot
+    // grows, the type stays at its native size, and the logo gets bigger
+    // relative to the type rather than in step with it.
+    let textTop = 350
+    let textH = 700 - textTop
+    let slotW = 560
+    let slotH = 560
+    // Clear of the wordmark by more than the tracer's own padding. boundsOf
+    // widens the model's box by the perspective sweep (rp8/6 + dxa8/6) and the
+    // tracer paints its background across the whole padded rect, so a slot that
+    // merely fits the glyph still writes black over type the glyph never
+    // reaches. That pad is a fraction of the glyph, so the gap has to be a
+    // fraction of the slot — a fixed clearance stops working the moment the
+    // slot changes size, which is what made this a measured constant before.
+    let gap = slotH / 10
+    let assemblyH = slotH + gap + textH
+    let assemblyY = Common.Fixed.clamp ((h - assemblyH) / 2) 0 h
+    let splashY = assemblyY + slotH + gap - textTop
+    let ext8x = if gx1 > gx0 then gx1 - gx0 else 1
+    let ext8y = if gy1 > gy0 then gy1 - gy0 else 1
+    let kx = (slotW * 4096 * 256) / ext8x
+    let ky = (slotH * 4096 * 256) / ext8y
+    let kFit = if kx < ky then kx else ky
+    let k12 = (kFit * 9) / 10
+    Array.set ctx 13 (k12)
+    // Centre the model's box on the slot's centre, in the splash's frame.
+    let cxPx = w / 2
+    let cyPx = assemblyY + slotH / 2
+    Array.set ctx 6 ((cxPx * 256 - (k12 * ((gx0 + gx1) / 2)) / 4096))
+    Array.set ctx 7 ((cyPx * 256 - (k12 * ((gy0 + gy1) / 2)) / 4096))
+    Array.set ctx 8 (w)
+    // Conservative glyph bound: the tracer's sweep rect and the damage
+    // region the shell reports to the compositor are the same rectangle.
+    Common.Anim.boundsOf samples count ctx ((Array.get ctx 13))
+    Array.set ctx 0 ((Common.Fixed.clamp ((Array.get ctx 0)) 0 w))
+    Array.set ctx 1 ((Common.Fixed.clamp ((Array.get ctx 1)) 0 h))
+    Array.set ctx 2 ((Common.Fixed.clamp ((Array.get ctx 2)) 0 w))
+    Array.set ctx 3 ((Common.Fixed.clamp ((Array.get ctx 3)) 0 h))
+    Array.set ctx 14 splashX
+    Array.set ctx 15 splashY
+
+let fillTable (samples: int array) (count: int) (table: int array)
+              (ctx: int array) (stridePixels: int) (theta12: int) : unit =
+    let bandY = Array.get ctx 1
+    let bandRows = Array.get ctx 3 - bandY
+    Common.Trace.fillTable table samples count stridePixels (Array.get ctx 5)
+        (Array.get ctx 6) (Array.get ctx 7)
+        (Common.Fixed.cosSmall12 theta12) (Common.Fixed.sinSmall12 theta12) (Array.get ctx 4)
+        (Array.get ctx 0) (Array.get ctx 1) (Array.get ctx 2) (Array.get ctx 3)
+        bandY bandRows (Common.Model.anchorCount ()) (Array.get ctx 13) 16

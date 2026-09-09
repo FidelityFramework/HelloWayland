@@ -1,0 +1,253 @@
+/// Common.Model — swept-sphere model of the Clef logo glyph
+///
+/// The glyph is two CSG groups, and the split is authored here rather than
+/// discovered at render time:
+///
+///   ANCHORS  — the spiral bulb and the two dots. Whole spheres, each
+///              carrying its own fillet radius k.
+///   TUBE     — a polyline whose consecutive point pairs are round cones
+///              (tapered capsules) swept along the swoop centerline.
+///
+/// `Trace.pixel` takes the hard minimum *within* each group and the smooth
+/// minimum *between* them. That is the whole of the blending model: a group
+/// is one surface, so there is nothing inside it to fillet, and the only
+/// real crease in the glyph is where the tube emerges from the bulb.
+///
+/// The anchors occupy the first `anchorCount ()` entries. That ordering is
+/// load-bearing — the index boundary is how the tracer tells the groups
+/// apart, at no storage cost.
+///
+/// The centerline control points were measured offline from
+/// Clef_logo_full.svg (circle fits of the head boundaries, station table of
+/// the tail) and are stored as Q8 logo-viewBox units. Subdivision now serves
+/// only the *curve*: a round cone is exactly the swept-sphere envelope
+/// between two points, so samples no longer have to be dense enough to hide
+/// faceting, and the count falls from ~400 to ~100.
+module Common.Model
+
+open Common.Fixed
+
+/// Swoop centerline control points, "x,y,r" Q8 triples separated by ';'.
+/// The chain BEGINS at the spiral bulb — the bulb is the stroke at its
+/// widest, not a separate sphere — then narrows out of the spiral, over
+/// the head ring, and tapers to the tail tip. r is the local stroke radius.
+let private chainData () : string = "9820,9830,4237;8268,9605,3129;6715,9380,1560;5549,9217,179;5792,7754,676;6372,6568,991;7316,5437,1356;8092,4204,1098;9008,3006,947;10084,2198,836;11457,1549,803;12752,1164,718;14261,1008,762;15598,1114,877;17030,1549,1031;18323,2247,1221;19444,3139,1545;20348,4200,1790;21181,5423,2124;21785,6724,2305;22229,8042,2539;22426,8841,2609;22582,10452,2688;22241,13775,2662;21668,15770,2550;21158,17042,2463;20355,18639,2337;19766,19651,2266;18808,21089,2145;17636,22646,2022;15716,24868,1800;14861,25764,1692;13051,27423,1498;11213,28936,1324;9341,30385,1155;8128,31286,1016;7040,32067,858;5304,33300,509;4626,33823,292"
+
+/// Discrete spheres: the two dots ("x,y,r" Q8). Everything else in the
+/// glyph is one continuous swept chain.
+let private discData () : string = "28296,15342,2258;28291,6054,2258"
+
+/// Number of anchor spheres, and hence the index at which the tube polyline
+/// begins. Read by the tracer to split the two CSG groups.
+let anchorCount () : int = 3
+
+/// Fillet radius for the bulb, Q8 logo units — the one authored control
+/// over how the tube meets the bulb.
+///
+/// It is a length, and only a length: the distance from the intersection
+/// over which the smooth minimum acts. Nothing scales it by a radius, a
+/// screen size or a depth, which is what makes it independent of everything
+/// else in the model. `smin` departs from `min` by at most k/4, so this also
+/// fixes exactly how far the blended surface can bulge outside the hard
+/// union — see the k/4 term in Trace.fillTable.
+let filletK () : int = 1800
+
+/// The dots touch nothing, so their junction radius is zero and the minimum
+/// against them stays exact.
+let discK () : int = 0
+
+/// The anchor's body axis: semi-axis scale along it (Q12, 4096 = isotropic)
+/// and its tilt from the view axis (Q12 radians).
+///
+/// A sphere is invariant under SO(3), so its specular highlight cannot report
+/// rotation — there is nothing to report, and the measured motion is radial to
+/// three significant figures whatever the light does. An ellipsoid is a sphere
+/// under a rotor and a scale; giving the body a frame gives the highlight
+/// something to track. See docs/a-sphere-has-no-orientation.md.
+///
+/// 4096 with any tilt is exactly the sphere case — the general form degenerates
+/// to the old one to 7e-12, so the bulb costs nothing by going through it.
+let anchorScale (i: int) : int = if i = 0 then 4096 else 3482   // bulb sphere, dots 0.85
+let anchorTilt  (i: int) : int = if i = 0 then 0    else 1787   // 0 and 25 degrees, Q12
+
+/// Nudge of the bulb anchor away from chain control point 0, Q8 logo units.
+///
+/// The bulb is an anchor now, not a chain sample, so its centre is an
+/// independent control — which is the point of splitting the groups. Seated
+/// exactly on control point 0 it sits far enough under the arc that the
+/// fillet reaches across a wide band of its surface and it reads as a
+/// swelling in the stroke rather than as a ball. Moving it out along the
+/// bisector of the junction, down and away from the arc overhead, leaves it
+/// reading as a sphere with a neck. Purely a shape decision; nothing in the
+/// field evaluation depends on it.
+let private bulbDX () : int = 0 - 500
+let private bulbDY () : int = 500
+
+/// Where the spiral stops being the bulb and starts being the stroke.
+///
+/// A sample is dropped only when it CONTRIBUTES NOTHING: when its sphere
+/// lies entirely inside the bulb anchor, so the hard minimum can never
+/// select it. That is exact, and it is the weakest defensible test — which
+/// matters, because every sample dropped beyond it is stroke geometry
+/// thrown away.
+///
+/// Two blunter rules were tried and both fail at the extremes of the pivot.
+/// Cutting the chain at a whole control point, and dropping any sample
+/// whose sphere merely covers the bulb's centre, each start the tube
+/// further out than the bulb's surface reaches. At head-on angles the bulb
+/// hides the shortfall; at the far negative swing the spiral is seen from
+/// outside and it reads as an open notch between the stroke and the ball —
+/// background, not shading, so no light position can close it.
+let private containedInBulb (x: int) (y: int) (r: int)
+                            (bx: int) (by: int) (br: int) : int =
+    let dx = x - bx
+    let dy = y - by
+    if Fixed.isqrt (dx * dx + dy * dy) + r <= br then 1 else 0
+
+/// Parse non-negative integers separated by ',' or ';' into out.
+/// Returns the number of values written.
+let parseInts (s: string) (out: int array) : int =
+    let codes = String.toBytes s
+    let n = Array.length codes
+    let mutable count = 0
+    let mutable acc = 0
+    let mutable i = 0
+    while i < n do
+        let code = Array.get codes i
+        if code >= 48 && code <= 57 then
+            acc <- acc * 10 + (code - 48)
+        else
+            Array.set out count (acc)
+            count <- count + 1
+            acc <- 0
+        i <- i + 1
+    Array.set out count (acc)
+    count + 1
+
+/// Catmull-Rom interpolation of one component at t8 (Q8, 0..256):
+/// 0.5 * (2*p1 + (p2-p0)*t + (2p0-5p1+4p2-p3)*t^2 + (-p0+3p1-3p2+p3)*t^3)
+let catmull (p0: int) (p1: int) (p2: int) (p3: int) (t8: int) : int =
+    let t2 = (t8 * t8) / 256
+    let t3 = (t2 * t8) / 256
+    let a = p2 - p0
+    let b = 2 * p0 - 5 * p1 + 4 * p2 - p3
+    let c = 0 - p0 + 3 * p1 - 3 * p2 + p3
+    (2 * p1 * 256 + a * t8 + b * t2 + c * t3) / 512
+
+/// Build the primitive list. samples receives (x8, y8, r8, k8, scale12, tilt12)
+/// int sextuples; capacity 512. Returns the point count (0 on allocation failure).
+///
+/// Emission order is the group split:
+///   [0]                    bulb anchor
+///   [1 .. anchorCount-1]   dot anchors
+///   [anchorCount ..]       tube polyline, consecutive pairs are cones
+///
+/// Spacing is ~0.6 of the local radius. That is five times coarser than the
+/// old ~0.12r and still exact, because the cone between two points *is* the
+/// surface; the only remaining job of subdivision is to follow the
+/// Catmull-Rom curve. Keeping the step below r also guarantees consecutive
+/// endpoint spheres overlap, which is what lets the tracer's ray-sphere
+/// first pass stand in for a ray-cone test without ever missing a ray that
+/// clips only the conical flank.
+let build (samples: int array) : int =
+    let ctrl = Array.zeroCreate<int> 256
+    // Read the dots out first and hold them in scalars: the control buffer
+    // is reused for the chain, and the anchors must be emitted before it.
+    let nDisc = parseInts (discData ()) ctrl
+    let nDot = nDisc / 3
+    let d0x = (Array.get ctrl 0)
+    let d0y = (Array.get ctrl 1)
+    let d0r = (Array.get ctrl 2)
+    let d1x = if nDot > 1 then (Array.get ctrl 3) else 0
+    let d1y = if nDot > 1 then (Array.get ctrl 4) else 0
+    let d1r = if nDot > 1 then (Array.get ctrl 5) else 0
+
+    let nVals = parseInts (chainData ()) ctrl
+    let nCtrl = nVals / 3
+    let mutable count = 0
+
+    // Anchor 0: the bulb. Seeded from chain control point 0 — the stroke at
+    // its widest — then nudged out along the junction bisector. It is a whole
+    // sphere here, not a chain sample, and it owns the only non-zero fillet
+    // radius in the model.
+    let bulbX = (Array.get ctrl 0) + bulbDX ()
+    let bulbY = (Array.get ctrl 1) + bulbDY ()
+    let bulbR = (Array.get ctrl 2)
+    Array.set samples 0 (bulbX)
+    Array.set samples 1 (bulbY)
+    Array.set samples 2 (Array.get ctrl 2)
+    Array.set samples 3 ((filletK ()))
+    Array.set samples 4 ((anchorScale 0))
+    Array.set samples 5 ((anchorTilt 0))
+    Array.set samples 6 (d0x)
+    Array.set samples 7 (d0y)
+    Array.set samples 8 (d0r)
+    Array.set samples 9 ((discK ()))
+    Array.set samples 10 ((anchorScale 1))
+    Array.set samples 11 ((anchorTilt 1))
+    Array.set samples 12 (d1x)
+    Array.set samples 13 (d1y)
+    Array.set samples 14 (d1r)
+    Array.set samples 15 ((discK ()))
+    Array.set samples 16 ((anchorScale 2))
+    Array.set samples 17 ((anchorTilt 2))
+    count <- anchorCount ()
+
+    let mutable i = 0
+    while i < nCtrl - 1 do
+        let i0 = if i > 0 then i - 1 else 0
+        let i3 = if i + 2 < nCtrl then i + 2 else nCtrl - 1
+        let p0x = (Array.get ctrl (i0 * 3 + 0))
+        let p0y = (Array.get ctrl (i0 * 3 + 1))
+        let p1x = (Array.get ctrl (i * 3 + 0))
+        let p1y = (Array.get ctrl (i * 3 + 1))
+        let p1r = (Array.get ctrl (i * 3 + 2))
+        let p2x = (Array.get ctrl ((i + 1) * 3 + 0))
+        let p2y = (Array.get ctrl ((i + 1) * 3 + 1))
+        let p2r = (Array.get ctrl ((i + 1) * 3 + 2))
+        let p3x = (Array.get ctrl (i3 * 3 + 0))
+        let p3y = (Array.get ctrl (i3 * 3 + 1))
+        let dx = p2x - p1x
+        let dy = p2y - p1y
+        let seg = Fixed.isqrt (dx * dx + dy * dy)
+        // The SMALLER of the two radii, not the mean. The spacing guarantee
+        // the tracer relies on — consecutive endpoint spheres overlap, so a
+        // ray-sphere first pass never misses a ray that clips only the
+        // conical flank — has to hold at the thin end of a tapering span.
+        // Averaging let two spans near the r=179 waist space their samples
+        // wider than the local radius.
+        let rMin = if p1r < p2r then p1r else p2r
+        let stepA = (rMin * 154) / 256         // ~0.60 * r in Q8
+        let step = if stepA > 77 then stepA else 77
+        let mutable n = seg / step + 1
+        if n > 40 then n <- 40 else ()
+        let mutable j = 0
+        while j < n do
+            let t8 = (j * 256) / n
+            let sx = catmull p0x p1x p2x p3x t8
+            let sy = catmull p0y p1y p2y p3y t8
+            let sr = Fixed.lerp8 p1r p2r t8
+            if count < 508 && containedInBulb sx sy sr bulbX bulbY bulbR = 0 then
+                Array.set samples (count * 6 + 0) (sx)
+                Array.set samples (count * 6 + 1) (sy)
+                Array.set samples (count * 6 + 2) (sr)
+                Array.set samples (count * 6 + 3) (0)
+                Array.set samples (count * 6 + 4) (4096)
+                Array.set samples (count * 6 + 5) (0)
+                count <- count + 1
+            else
+                ()
+            j <- j + 1
+        i <- i + 1
+    // final control point closes the chain at the tail tip
+    if nCtrl > 0 && count < 508 then
+        Array.set samples (count * 6 + 0) (Array.get ctrl ((nCtrl - 1) * 3 + 0))
+        Array.set samples (count * 6 + 1) (Array.get ctrl ((nCtrl - 1) * 3 + 1))
+        Array.set samples (count * 6 + 2) (Array.get ctrl ((nCtrl - 1) * 3 + 2))
+        Array.set samples (count * 6 + 3) (0)
+        Array.set samples (count * 6 + 4) (4096)
+        Array.set samples (count * 6 + 5) (0)
+        count <- count + 1
+    else
+        ()
+    count

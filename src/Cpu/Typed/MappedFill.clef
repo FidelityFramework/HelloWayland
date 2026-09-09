@@ -1,0 +1,41 @@
+/// Direct writes into a schema-bound mapping borrowed for this call.
+module MappedFill
+
+open BAREWire.Platform
+
+let render (table: int array) (requiredTableElements: int)
+           (view: BorrowedView<Fidelity.GBM.Native.Types.Abgr8888>)
+           (mappedHeight: int) (chunk: int) : int =
+    let strideBytes = BorrowedView.stride view
+    let capacity = BorrowedView.length view
+    if requiredTableElements < 32 || chunk <= 0 || mappedHeight < 0
+       || strideBytes <= 0 || strideBytes % 4 <> 0
+       || not (DispatchRegions.contains (Array.length table) 0 requiredTableElements) then 22
+    else
+    let stridePixels = strideBytes / 4
+    let bandStart = Array.get table 16
+    let bandRows = Array.get table 17
+    if Array.get table 0 <> stridePixels || Array.get table 1 <> mappedHeight
+       || not (DispatchRegions.fitsByteLength capacity mappedHeight stridePixels)
+       || not (DispatchRegions.contains mappedHeight bandStart bandRows) then 22
+    else
+    if bandStart < 0 || bandRows < 0 || bandStart > mappedHeight
+       || bandRows > mappedHeight - bandStart then 22
+    else
+    let first = bandStart * stridePixels
+    let count = bandRows * stridePixels
+    if not (DispatchRegions.contains capacity first count) then 22
+    else
+    // The synchronous callback contract places this environment in the call
+    // scope. Every carrier retires before run returns and the mapping closes.
+    let work = fun (lo: int) (hi: int) ->
+        if first < 0 || count < 0 || first > BorrowedView.length view
+           || count > BorrowedView.length view - first
+           || lo < 0 || hi < lo || hi > count then 22
+        else
+            let mutable index = lo
+            while index < hi do
+                BorrowedView.set view (first + index) (Common.Trace.pixel index table count)
+                index <- index + 1
+            0
+    Fidelity.Ariel.Region.run count chunk work

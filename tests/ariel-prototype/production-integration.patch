@@ -1,0 +1,93 @@
+diff --git i/HelloWayland.fidproj w/HelloWayland.fidproj
+index dcf2369..203a493 100644
+--- i/HelloWayland.fidproj
++++ w/HelloWayland.fidproj
+@@ -20,6 +20,7 @@ platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fid
+ 
+ # Desktop lifecycle — transitively pulls in Platform.Display, Wayland, DRM, GBM, Libc, resvg
+ desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
++ariel = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Ariel.fidproj" }
+ 
+ 
+ [build]
+@@ -37,4 +38,4 @@ output = "CPU-HelloWayland"
+ output_kind = "console"
+ 
+ [link]
+-libraries = ["wayland-client", "drm", "gbm", "resvg"]
++libraries = ["wayland-client", "drm", "gbm", "resvg", "pthread"]
+diff --git i/src/Common/Host.clef w/src/Common/Host.clef
+index 79fd185..ba42cf8 100644
+--- i/src/Common/Host.clef
++++ w/src/Common/Host.clef
+@@ -389,15 +389,18 @@ let renderInto (bo: nativeint)
+     | None -> 1
+     | Some mb ->
+     let mapped = mb.Mapped
+-    let rc = Fill.frame table ctx
+-                 (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12))
+-                 mapped stride
++    let rc =
++        if mb.Stride <> stride then 22
++        else
++            Fill.frame table ctx
++                (NativePtr.ofNativeInt<nativeint> (NativePtr.get handles 12))
++                mapped mb.Stride
+     Graphics.unmapBuffer bo mb.MapData
+     rc
+ 
+ /// Run the animated splash: responsive window, +-30 deg pivot with a 2 s
+ /// traverse per swing (4 s period), compositor-paced at the display rate.
+-let run (title: string) : int =
++let private runWithFill (title: string) (fillRaw: nativeint) : int =
+     let globalsRaw =
+         match Fidelity.Libc.Memory.malloc (unativeint 32) with
+         | Some v -> v
+@@ -449,10 +452,6 @@ let run (title: string) : int =
+         match Fidelity.Libc.Memory.malloc (unativeint 12288) with
+         | Some v -> v
+         | None -> 0n
+-    let fillRaw =
+-        match Fidelity.Libc.Memory.malloc (unativeint 256) with
+-        | Some v -> v
+-        | None -> 0n
+     let ctxRaw =
+         match Fidelity.Libc.Memory.malloc (unativeint 64) with
+         | Some v -> v
+@@ -622,9 +621,20 @@ let run (title: string) : int =
+     Fidelity.Libc.Memory.free (Some frameSlotsRaw) |> ignore
+     Fidelity.Libc.Memory.free (Some handlesRaw) |> ignore
+     Fidelity.Libc.Memory.free (Some ctxRaw) |> ignore
+-    Fidelity.Libc.Memory.free (Some fillRaw) |> ignore
+     Fidelity.Libc.Memory.free (Some samplesRaw) |> ignore
+     Fidelity.Libc.Memory.free (Some stateRaw) |> ignore
+     Fidelity.Libc.Memory.free (Some globalsRaw) |> ignore
+     Connection.disconnect disp
+     0
++
++/// Own the fill state outside the host's early-return paths. Region shutdown
++/// joins the persistent carriers before the containing state allocation is freed.
++let run (title: string) : int =
++    match Fidelity.Libc.Memory.malloc (unativeint 256) with
++    | None -> 1
++    | Some fillRaw ->
++        Fidelity.Libc.Memory.memset (Some fillRaw) 0 (unativeint 256) |> ignore
++        let result = runWithFill title fillRaw
++        let stopped = Fill.shutdown (NativePtr.ofNativeInt<nativeint> fillRaw)
++        if stopped = 0 then Fidelity.Libc.Memory.free (Some fillRaw) |> ignore else ()
++        if result <> 0 then result else stopped
+diff --git i/src/Gpu/Fill.clef w/src/Gpu/Fill.clef
+index 7a1d5cc..523290d 100644
+--- i/src/Gpu/Fill.clef
++++ w/src/Gpu/Fill.clef
+@@ -56,6 +56,10 @@ let shadowSteps () : int = 16
+ /// CPU staging copy that would overwrite the device's frame.
+ let wantsCpuMapping () : int = 0
+ 
++/// The shared host closes a fill realization before releasing its state. This
++/// GPU path has no persistent CPU carriers; device calls already synchronize.
++let shutdown (fill: nativeptr<nativeint>) : int = 0
++
+ // ── ABI note ────────────────────────────────────────────────
+ // The generated bindings take the opaque handles as [<Struct>] records
+ // ({ Handle: nativeint }). Composer currently marshals a record argument

@@ -16,25 +16,31 @@ word_size = 64
 
 [dependencies]
 # Platform binding — required for platform context (must be named "platform")
-platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
-
-# Desktop lifecycle — transitively pulls in Platform.Display, Wayland, DRM, GBM, Libc, resvg
-desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
+platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
+ariel = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Ariel.fidproj" }
+dispatch = { path = "../BAREWire/src/BAREWire.DispatchCore.fidproj" }
+wayland = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Wayland.Native.fidproj" }
+display = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Display.Native.fidproj" }
+gbm = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.GBM.Native.fidproj" }
+resvg = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Image.Resvg.Native.fidproj" }
 
 
 [build]
 sources = [
     "src/Common/Fixed.clef",
     "src/Common/Geometry.clef",
-    "src/Common/Trace.clef",
-    "src/Common/Model.clef",
-    "src/Common/Anim.clef",
-    "src/Cpu/Fill.clef",
-    "src/Common/Host.clef",
-    "src/Main.clef"
+    "src/Cpu/Typed/Trace.clef",
+    "src/Cpu/Typed/Model.clef",
+    "src/Cpu/Typed/Anim.clef",
+    "src/Cpu/Typed/Layout.clef",
+    "src/Cpu/Typed/Composition.clef",
+    "src/Cpu/Typed/MappedFill.clef",
+    "src/Cpu/Window.clef",
+    "src/Cpu/Host.clef",
+    "src/Cpu/Main.clef"
 ]
 output = "CPU-HelloWayland"
 output_kind = "console"
 
 [link]
-libraries = ["wayland-client", "drm", "gbm", "resvg"]
+libraries = ["wayland-client", "drm", "gbm", "resvg", "pthread"]

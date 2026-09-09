@@ -1,0 +1,161 @@
+/// EXPERIMENTAL, UNSUPPORTED BY CURRENT CCS: this preserved implementation uses
+/// the removed NativePtr/nativeint pointer surface. It is not part of the
+/// production source list. Migration must use the normative CHandle boundary and
+/// compiler-owned array projection; do not restore raw pointer intrinsics.
+///
+/// Fill (CPU) — the same tracer, walked on the CPU
+///
+/// One of two files providing `module Fill`; the fidproj chooses which is
+/// compiled. This build links no ROCm and never touches a device.
+///
+/// It has no renderer of its own. Every pixel comes from
+/// Common.Trace.pixel — the identical definition the GPU build dispatches
+/// inside a code object — walked here in an ordinary loop.
+module Fill
+
+open Console
+open Common.Fixed
+open Common.Trace
+open BAREWire.Platform
+
+let label () : string = "CPU (Common.Trace, Ariel regions)"
+
+/// Which rows of the splash plate this build hides. The asset carries both
+/// the CPU and GPU Driver rows at the same coordinates, and each build
+/// suppresses the other's — one asset, no duplication, and the plate cannot
+/// disagree with the binary because the binary is what selects.
+let plateCss () : string = "#tag-gpu,#drv-gpu-1,#drv-gpu-2{display:none}"
+
+/// Shadow march steps.
+///
+/// NOT a quality dial, and not a guess. The march is a sphere trace, so it
+/// converges: past a certain count more steps cannot change the image. Measured
+/// against a 64-step reference, the deviation falls under 1/255 at 12 steps and
+/// to zero by 24, so 16 is converged with margin.
+///
+/// It is therefore the same number on every substrate, because a shorter march
+/// is not a cheaper rendering of the same picture — it is a different picture.
+/// The silicon's capability shows up where it belongs, in the frame rate: the
+/// identical 16 steps run at ~180 fps on gfx1151 and ~6 fps on one CPU core.
+let shadowSteps () : int = 16
+
+/// The CPU writes pixels itself, so the shell must map the buffer object.
+let wantsCpuMapping () : int = 1
+
+/// The table remains an array in the captured environment. Its complete target
+/// descriptor, including extent and stride, is laid out by the compiler; the
+/// callback never reconstructs an array from a raw pointer or a guessed prefix.
+type FrameCapture = {
+    Table: int array
+    Output: nativeptr<int32>
+    Count: int
+}
+
+/// A range callback with no implicit closure. The synchronous region retains
+/// this stack-local environment until every participating carrier releases it.
+let private renderRange (environment: nativeint) (lo: int) (hi: int) : int =
+    let capture = NativePtr.read (NativePtr.ofNativeInt<FrameCapture> environment)
+    if lo < 0 || hi < lo || hi > capture.Count then 22
+    else
+    let mutable i = lo
+    while i < hi do
+        NativePtr.set capture.Output i (int32 (Trace.pixel i capture.Table capture.Count))
+        i <- i + 1
+    0
+
+/// The fill state owns one pool. Explicit counts are useful to the native
+/// equivalence harness; normal startup uses Ariel's allowed-affinity policy.
+let startWithCarriers (fill: nativeptr<nativeint>) (carriers: int) : int =
+    if NativePtr.get fill 0 <> 0n then 16
+    else
+    match Fidelity.Ariel.Region.start carriers with
+    | Error code -> code
+    | Ok pool ->
+        NativePtr.set fill 0 pool
+        0
+
+let private ensureStarted (fill: nativeptr<nativeint>) : int =
+    if NativePtr.get fill 0 <> 0n then 0
+    else
+    match Fidelity.Ariel.Region.startAllowed () with
+    | Error code -> code
+    | Ok pool ->
+        NativePtr.set fill 0 pool
+        0
+
+/// Joining the persistent carriers is separate from completing one frame. The
+/// host calls this on every exit after allocating fill state, including errors.
+let shutdown (fill: nativeptr<nativeint>) : int =
+    let pool = NativePtr.get fill 0
+    if pool = 0n then 0
+    else
+    let rc = Fidelity.Ariel.Region.stop pool
+    if rc = 0 then NativePtr.set fill 0 0n else ()
+    rc
+
+/// Nothing in the pool depends on the mapping size; each region captures the
+/// actual table, mapping and count for this frame.
+let resize (samples: nativeptr<int32>) (count: int)
+           (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+           (w: int) (h: int) (stride: int) : int =
+    let started = ensureStarted fill
+    if started <> 0 then started
+    else
+        // The same complete extent the host allocates from the model, retained
+        // independently of the descriptor subsequently supplied to a frame.
+        NativePtr.set fill 1 (nativeint (Trace.tableSize count))
+        0
+
+/// The mapping's actual row stride and mapped height bound the band before any
+/// count-to-byte product or native address arithmetic. The public entry also
+/// permits display-independent serial/parallel equivalence tests.
+let frameMapped (table: int array) (fill: nativeptr<nativeint>)
+                (mapped: nativeint) (stride: int) (mappedHeight: int) : int =
+    let requiredTableElements = int64 (NativePtr.get fill 1)
+    if requiredTableElements < 32L
+       || not (DispatchRegions.contains (int64 (Array.length table)) 0L requiredTableElements) then 22
+    else
+    let stridePx = Array.get table 0
+    let bandY0 = Array.get table 16
+    let bandRows = Array.get table 17
+    let pixelBytes = int64 (NativePtr.toNativeInt (NativePtr.add (NativePtr.ofNativeInt<int32> 0n) 1))
+    let tableElementBytes = int64 (NativePtr.toNativeInt (NativePtr.add (NativePtr.ofNativeInt<int> 0n) 1))
+    let maxBytes = Fidelity.Platform.Linux_x86_64.Capabilities.ariel_max_byte_extent
+    let addressLimit = Fidelity.Platform.Linux_x86_64.Capabilities.ariel_address_space_limit
+    if pixelBytes <= 0L || stride <= 0 || stridePx < 0
+       || int64 stride % pixelBytes <> 0L
+       || int64 stridePx <> int64 stride / pixelBytes
+       || Array.get table 1 <> mappedHeight
+       || not (DispatchRegions.contains (int64 mappedHeight) (int64 bandY0) (int64 bandRows))
+       || not (DispatchRegions.fitsByteLength maxBytes (int64 mappedHeight) (int64 stride))
+       || not (DispatchRegions.fitsByteLength maxBytes (int64 bandRows) (int64 stridePx))
+       || not (DispatchRegions.fitsByteLength maxBytes (int64 (Array.length table)) tableElementBytes) then 22
+    else
+    let mappedBytes = int64 mappedHeight * int64 stride
+    let bandOffset = int64 bandY0 * int64 stride
+    let bandBytes = int64 bandRows * int64 stride
+    let count64 = int64 bandRows * int64 stridePx
+    if not (DispatchRegions.contains mappedBytes bandOffset bandBytes)
+       || not (DispatchRegions.contains addressLimit (int64 mapped) mappedBytes)
+       || int64 mapped % pixelBytes <> 0L
+       || int64 (int count64) <> count64 then 22
+    else
+    let count = int count64
+    if count = 0 then 0
+    elif mapped = 0n then 22
+    else
+    let started = ensureStarted fill
+    if started <> 0 then started
+    else
+    let output = NativePtr.add (NativePtr.ofNativeInt<int32> mapped) (int (bandOffset / pixelBytes))
+    let capture = { Table = table; Output = output; Count = count }
+    // Contiguous index ranges preserve the same per-pixel calculation. Chunk
+    // length is scheduling policy; Ariel clips the final range to the domain.
+    Fidelity.Ariel.Region.run (NativePtr.get fill 0) count 256
+        (FnPtr.ofFunction renderRange) (nativeint &capture)
+
+/// Synchronous return is the host's unmap boundary. A failed region reports its
+/// failure after retirement; no partial image is presented or replayed serially.
+let frame (table: int array) (ctx: nativeptr<int32>) (fill: nativeptr<nativeint>)
+          (mapped: nativeint) (stride: int) : int =
+    frameMapped table fill mapped stride (int (NativePtr.get ctx 5))

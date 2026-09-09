@@ -1,0 +1,36 @@
+/// The real renderer, using typed sample/input/output arrays throughout.
+module SerialRenderer
+
+let mainCase () : int =
+    let samples = Array.zeroCreate<int> 3072
+    let count = Common.Model.build samples
+    let table = Array.zeroCreate<int> (Common.Trace.tableSize count)
+    let width = 64
+    let height = 80
+    let stride = 67
+    let bandY = 3
+    let bandRows = 73
+    Common.Trace.fillTable table samples count stride height
+        (width * 128) (height * 128)
+        (Common.Fixed.cosSmall12 1072) (Common.Fixed.sinSmall12 1072)
+        width 0 0 width height bandY bandRows (Common.Model.anchorCount ()) 1024 16
+    let total = bandRows * stride
+    let pixels = Array.zeroCreate<int> total
+    let mutable i = 0
+    let mutable nonbackground = 0
+    let mutable checksum = 0
+    while i < total do
+        let pixel = Common.Trace.pixel i table total
+        Array.set pixels i pixel
+        if pixel <> Common.Trace.background () then nonbackground <- nonbackground + 1 else ()
+        checksum <- (checksum + pixel) % 1000000007
+        i <- i + 1
+    if count > 3 && nonbackground > 0 && checksum > 0 then
+        Console.writeln "typed serial renderer: passed"
+        0
+    else
+        Console.writeln "typed serial renderer: failed model, visible pixels or checksum"
+        1
+
+[<EntryPoint>]
+let main _ = mainCase ()

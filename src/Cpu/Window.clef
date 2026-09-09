@@ -1,0 +1,237 @@
+/// Typed Wayland protocol state for the animated CPU window.
+module CpuWindow
+
+open Fidelity.Wayland.Core
+open Fidelity.Wayland.Bridge.Protocol
+open Fidelity.Wayland.Bridge.XdgShell
+open Fidelity.Wayland.Bridge.DmaBuf
+open Fidelity.Wayland.Bridge.Callbacks
+
+type Window = {
+    Display: CHandle<unit>
+    Registry: CHandle<unit>
+    Surface: CHandle<unit>
+    XdgSurface: CHandle<unit>
+    Toplevel: CHandle<unit>
+    WmBase: CHandle<unit>
+    DmaBuf: CHandle<unit>
+    Context: CHandle<unit>
+}
+
+// Wayland invokes these callbacks only from this owner's dispatch. Context is
+// an opaque identity, never interpreted as a pointer to Clef state.
+let private events: int array = Array.zeroCreate 5
+let private globals: option<CHandle<unit>> array = Array.zeroCreate 3
+let private buffers: option<CHandle<unit>> array = Array.zeroCreate 4
+let private busy: int array = Array.zeroCreate 4
+let mutable private frameCallback: option<CHandle<unit>> = None
+
+let private wmPing (_data: CHandle<unit>) (wm: CHandle<unit>) (serial: int) : unit =
+    xdg_wm_base_pong wm serial
+
+let private dmabufFormat (_data: CHandle<unit>) (_dmabuf: CHandle<unit>) (_format: int) : unit = ()
+
+let private dmabufModifier (_data: CHandle<unit>) (_dmabuf: CHandle<unit>)
+                           (_format: int) (_modifierHigh: int) (_modifierLow: int) : unit = ()
+
+let private wmListener: XdgWmBaseListener = { Ping = FnPtr.ofFunction wmPing }
+let private dmabufListener: ZwpLinuxDmabufListener = {
+    Format = FnPtr.ofFunction dmabufFormat
+    Modifier = FnPtr.ofFunction dmabufModifier
+}
+
+let private registryGlobal (data: CHandle<unit>) (registry: CHandle<unit>)
+                           (name: int) (interfaceName: CHandle<unit>) (version: int) : unit =
+    if Fidelity.Display.Native.strcmp interfaceName "wl_compositor" = 0 then
+        if version >= 4 then Array.set globals 0 (wl_registry_bind_compositor registry name 4) else ()
+    else if Fidelity.Display.Native.strcmp interfaceName "xdg_wm_base" = 0 then
+        let v = if version < 2 then version else 2
+        match wl_registry_bind_xdg_wm_base registry name v with
+        | None -> ()
+        | Some wm ->
+            if addXdgWmBaseListener wm wmListener data = 0 then Array.set globals 1 (Some wm) else ()
+    else if Fidelity.Display.Native.strcmp interfaceName "zwp_linux_dmabuf_v1" = 0 then
+        let v = if version < 3 then version else 3
+        if v < 2 then ()
+        else
+        match wl_registry_bind_dmabuf registry name v with
+        | None -> ()
+        | Some dmabuf ->
+            if addZwpLinuxDmabufListener dmabuf dmabufListener data = 0 then Array.set globals 2 (Some dmabuf) else ()
+    else ()
+
+let private registryRemove (_data: CHandle<unit>) (_registry: CHandle<unit>) (_name: int) : unit = ()
+
+let private surfaceConfigure (_data: CHandle<unit>) (surface: CHandle<unit>) (serial: int) : unit =
+    xdg_surface_ack_configure surface serial
+
+let private toplevelConfigure (_data: CHandle<unit>) (_toplevel: CHandle<unit>)
+                              (width: int) (height: int) (_states: CHandle<unit>) : unit =
+    Array.set events 1 width
+    Array.set events 2 height
+
+let private toplevelClose (_data: CHandle<unit>) (_toplevel: CHandle<unit>) : unit =
+    Array.set events 0 1
+
+let private configureBounds (_data: CHandle<unit>) (_toplevel: CHandle<unit>)
+                            (_width: int) (_height: int) : unit = ()
+
+let private wmCapabilities (_data: CHandle<unit>) (_toplevel: CHandle<unit>)
+                           (_capabilities: CHandle<unit>) : unit = ()
+
+let private frameDone (_data: CHandle<unit>) (callback: CHandle<unit>) (timestamp: int) : unit =
+    wl_proxy_destroy callback
+    frameCallback <- None
+    Array.set events 3 1
+    Array.set events 4 timestamp
+
+let private bufferRelease (_data: CHandle<unit>) (buffer: CHandle<unit>) : unit =
+    let mutable slot = 0
+    while slot < 4 do
+        match Array.get buffers slot with
+        | Some candidate ->
+            if candidate = buffer then Array.set busy slot 0 else ()
+        | None -> ()
+        slot <- slot + 1
+
+// Listener records and their native code pointers outlive every proxy using
+// them. Registration projects each record through its generated C descriptor.
+let private registryListener: WlRegistryListener = {
+    Global = FnPtr.ofFunction registryGlobal
+    GlobalRemove = FnPtr.ofFunction registryRemove
+}
+let private surfaceListener: XdgSurfaceListener = { Configure = FnPtr.ofFunction surfaceConfigure }
+let private toplevelListener: XdgToplevelListener = {
+    Configure = FnPtr.ofFunction toplevelConfigure
+    Close = FnPtr.ofFunction toplevelClose
+    ConfigureBounds = FnPtr.ofFunction configureBounds
+    WmCapabilities = FnPtr.ofFunction wmCapabilities
+}
+let private frameListener: WlCallbackListener = { Done = FnPtr.ofFunction frameDone }
+let private bufferListener: WlBufferListener = { Release = FnPtr.ofFunction bufferRelease }
+
+let closed () : bool = Array.get events 0 <> 0
+let configuredWidth () : int = Array.get events 1
+let configuredHeight () : int = Array.get events 2
+let frameReady () : bool = Array.get events 3 <> 0
+let frameTime () : int = Array.get events 4
+let available (slot: int) : bool = Array.get busy slot = 0
+
+let connect (title: string) (context: CHandle<unit>) : option<Window> =
+    if not (Fidelity.Wayland.Bridge.ProtocolInterfaces.initialize ()) then None
+    else
+    match wl_display_connect None with
+    | None -> None
+    | Some display ->
+    match wl_display_get_registry display with
+    | None -> wl_display_disconnect display; None
+    | Some registry ->
+    if addWlRegistryListener registry registryListener context <> 0
+       || wl_display_roundtrip display < 0 then
+        wl_display_disconnect display
+        None
+    else
+    match Array.get globals 0, Array.get globals 1, Array.get globals 2 with
+    | Some compositor, Some wmBase, Some dmabuf ->
+        match wl_compositor_create_surface compositor with
+        | None -> wl_display_disconnect display; None
+        | Some surface ->
+        match xdg_wm_base_get_xdg_surface wmBase surface with
+        | None -> wl_display_disconnect display; None
+        | Some xdgSurface ->
+        if addXdgSurfaceListener xdgSurface surfaceListener context <> 0 then
+            wl_display_disconnect display
+            None
+        else
+        match xdg_surface_get_toplevel xdgSurface with
+        | None -> wl_display_disconnect display; None
+        | Some toplevel ->
+        if addXdgToplevelListener toplevel toplevelListener context <> 0 then
+            wl_display_disconnect display
+            None
+        else
+        xdg_toplevel_set_title toplevel title
+        xdg_toplevel_set_app_id toplevel "com.speakez.fidelity"
+        wl_surface_commit surface
+        if wl_display_roundtrip display < 0 then
+            wl_display_disconnect display
+            None
+        else
+            Some { Display = display; Registry = registry; Surface = surface
+                   XdgSurface = xdgSurface; Toplevel = toplevel; WmBase = wmBase
+                   DmaBuf = dmabuf; Context = context }
+    | _ ->
+        wl_display_disconnect display
+        None
+
+/// Slot publication happens only after the listener has been installed.
+let createBuffer (window: Window) (slot: int) (fd: int) (width: int) (height: int)
+                 (stride: int) (format: int) : int =
+    match zwp_linux_dmabuf_v1_create_params window.DmaBuf with
+    | None -> 1
+    | Some parameters ->
+    zwp_linux_buffer_params_v1_add parameters fd 0 0 stride 0 0
+    let result = zwp_linux_buffer_params_v1_create_immed parameters width height format 0
+    zwp_linux_buffer_params_v1_destroy parameters
+    match result with
+    | None -> 1
+    | Some buffer ->
+        if addWlBufferListener buffer bufferListener window.Context <> 0 then
+            wl_buffer_destroy buffer
+            1
+        else
+            Array.set buffers slot (Some buffer)
+            Array.set busy slot 0
+            0
+
+/// A frame callback throttles future commits; it does not release this buffer.
+let present (window: Window) (slot: int) (x: int) (y: int) (width: int) (height: int) : int =
+    if not (available slot) then 16
+    else
+    match Array.get buffers slot with
+    | None -> 22
+    | Some buffer ->
+    match wl_surface_frame window.Surface with
+    | None -> 1
+    | Some callback ->
+    if addWlCallbackListener callback frameListener window.Context <> 0 then
+        wl_proxy_destroy callback
+        1
+    else
+        frameCallback <- Some callback
+        Array.set events 3 0
+        Array.set busy slot 1
+        wl_surface_attach window.Surface (Some buffer) 0 0
+        wl_surface_damage_buffer window.Surface x y width height
+        wl_surface_commit window.Surface
+        0
+
+let destroyBuffer (slot: int) : unit =
+    match Array.get buffers slot with
+    | None -> ()
+    | Some buffer ->
+        wl_buffer_destroy buffer
+        Array.set buffers slot None
+        Array.set busy slot 0
+
+/// Caller has already joined all carriers. Destroying the surface and crossing
+/// a roundtrip retires presentation before GBM storage is reclaimed by the host.
+let close (window: Window) : unit =
+    match frameCallback with
+    | Some callback -> wl_proxy_destroy callback; frameCallback <- None
+    | None -> ()
+    xdg_toplevel_destroy window.Toplevel
+    xdg_surface_destroy window.XdgSurface
+    wl_surface_destroy window.Surface
+    wl_display_roundtrip window.Display |> ignore
+    let mutable slot = 0
+    while slot < 4 do
+        destroyBuffer slot
+        slot <- slot + 1
+    xdg_wm_base_destroy window.WmBase
+    zwp_linux_dmabuf_v1_destroy window.DmaBuf
+    match Array.get globals 0 with
+    | Some compositor -> wl_proxy_destroy compositor
+    | None -> ()
+    wl_proxy_destroy window.Registry
+    wl_display_disconnect window.Display

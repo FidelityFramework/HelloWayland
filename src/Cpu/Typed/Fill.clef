@@ -1,0 +1,103 @@
+/// Typed CPU region adapter with reusable frame storage and worker callbacks.
+module TypedFill
+
+open BAREWire.Platform
+
+/// The owner updates Table only between completed render calls. The same
+/// session is used by one submitting owner; its arrays remain live until all
+/// carriers have stopped. Session construction is outside the animation loop.
+type Session = private {
+    Table: int array
+    RequiredTableElements: int
+    Pixels: int array
+    Extent: int array
+    Work: int -> int -> int
+}
+
+let private noCompletion: int -> int -> unit = fun _lo _hi -> ()
+
+/// Allocate one bounded extent/configuration cell and one callback environment for the whole
+/// rendering session. Completion is retained with that environment.
+let createWithCompletion (table: int array) (requiredTableElements: int) (pixels: int array)
+                         (stridePixels: int) (mappedHeight: int)
+                         (complete: int -> int -> unit) : Session =
+    let extent: int array = Array.zeroCreate 4
+    Array.set extent 2 stridePixels
+    Array.set extent 3 mappedHeight
+    let work = fun (lo: int) (hi: int) ->
+        let first = Array.get extent 0
+        let count = Array.get extent 1
+        // The bounded descriptor remains authoritative inside the callback,
+        // including when the extent changes between synchronous generations.
+        if first < 0 || count < 0 || first > Array.length pixels
+           || count > Array.length pixels - first
+           || lo < 0 || hi < lo || hi > count then 22
+        else
+            let mutable i = lo
+            while i < hi do
+                Array.set pixels (first + i) (Common.Trace.pixel i table count)
+                i <- i + 1
+            complete lo hi
+            0
+    { Table = table; RequiredTableElements = requiredTableElements; Pixels = pixels
+      Extent = extent; Work = work }
+
+let create (table: int array) (requiredTableElements: int) (pixels: int array)
+           (stridePixels: int) (mappedHeight: int) : Session =
+    createWithCompletion table requiredTableElements pixels stridePixels mappedHeight noCompletion
+
+/// Retarget existing capacity after the previous region has returned. A resize
+/// never replaces the arrays or callback; an oversized request leaves it intact.
+let resize (session: Session) (stridePixels: int) (mappedHeight: int) : int =
+    if stridePixels <= 0 || mappedHeight < 0
+       || not (DispatchRegions.fitsByteLength (Array.length session.Pixels) mappedHeight stridePixels) then 22
+    else
+        Array.set session.Extent 2 stridePixels
+        Array.set session.Extent 3 mappedHeight
+        0
+
+/// The expected input extent comes from Trace.tableSize at model construction,
+/// independently of the descriptor supplied here. Indirect lists are therefore
+/// part of the required input even when they follow the directly read prefix.
+/// This path allocates no new callback or frame storage.
+let render (session: Session) (chunk: int) : int =
+    let table = session.Table
+    let requiredTableElements = session.RequiredTableElements
+    let pixels = session.Pixels
+    let stridePixels = Array.get session.Extent 2
+    let mappedHeight = Array.get session.Extent 3
+    if requiredTableElements < 32
+       || not (DispatchRegions.contains (Array.length table) 0 requiredTableElements)
+       || stridePixels <= 0 || mappedHeight < 0 || chunk <= 0 then 22
+    else
+    let bandStart = Array.get table 16
+    let bandRows = Array.get table 17
+    if Array.get table 0 <> stridePixels || Array.get table 1 <> mappedHeight
+       || not (DispatchRegions.contains mappedHeight bandStart bandRows)
+       || not (DispatchRegions.fitsByteLength (Array.length pixels) mappedHeight stridePixels) then 22
+    else
+    // Current range analysis does not import the true-branch facts of contains.
+    // Repeat its exact predicate at this observation point so table element
+    // ranges are narrowed before multiplication. This is an explicit compiler
+    // integration gap; the shared BAREWire predicate remains the spatial check.
+    if bandStart < 0 || bandRows < 0 || bandStart > mappedHeight
+       || bandRows > mappedHeight - bandStart then 22
+    else
+    // The products are now bounded by the actual output descriptor extent.
+    let first = bandStart * stridePixels
+    let count = bandRows * stridePixels
+    if not (DispatchRegions.contains (Array.length pixels) first count) then 22
+    else
+    Array.set session.Extent 0 first
+    Array.set session.Extent 1 count
+    Fidelity.Ariel.Region.run count chunk session.Work
+
+/// One-shot convenience. Animation owners should create once and call render.
+let frameWithCompletion (table: int array) (requiredTableElements: int) (pixels: int array)
+                        (stridePixels: int) (mappedHeight: int) (chunk: int)
+                        (complete: int -> int -> unit) : int =
+    render (createWithCompletion table requiredTableElements pixels stridePixels mappedHeight complete) chunk
+
+let frame (table: int array) (requiredTableElements: int) (pixels: int array)
+          (stridePixels: int) (mappedHeight: int) (chunk: int) : int =
+    render (create table requiredTableElements pixels stridePixels mappedHeight) chunk

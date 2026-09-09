@@ -1,0 +1,26 @@
+[package]
+name = "HelloWayland.TypedArielSession"
+version = "0.1.0"
+
+[compilation]
+target = "cpu"
+
+[dependencies]
+platform = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
+ariel = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Ariel.fidproj" }
+dispatch = { path = "../../../BAREWire/src/BAREWire.DispatchCore.fidproj" }
+
+[build]
+sources = [
+    "../../src/Common/Fixed.clef",
+    "../../src/Common/Geometry.clef",
+    "../../src/Cpu/Typed/Trace.clef",
+    "../../src/Cpu/Typed/Model.clef",
+    "../../src/Cpu/Typed/Fill.clef",
+    "Session.clef"
+]
+output = "typed-renderer-session"
+output_kind = "console"
+
+[link]
+libraries = ["pthread"]

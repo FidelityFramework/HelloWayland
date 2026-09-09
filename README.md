@@ -1,6 +1,64 @@
 # HelloWayland
 
-A minimal Wayland splash screen written in **Clef** using the **Fidelity** framework, demonstrating how a 19-line program pulls in an entire native desktop stack through generated library bindings.
+A native logo renderer and Wayland splash written in **Clef** using **Fidelity**.
+
+## Animated CPU window
+
+[HelloWayland.fidproj](HelloWayland.fidproj) selects the typed CPU window in
+`src/Cpu`. Ariel supplies persistent pthread carriers for the existing glyph
+renderer; the submitting thread owns Wayland dispatch, GBM mapping, presentation,
+and resize. Listener records and opaque handle options cross generated Farscape
+boundaries. The GPU project continues to select its separate implementation.
+
+```sh
+/path/to/Composer compile HelloWayland.fidproj -o targets/CPU-HelloWayland
+targets/CPU-HelloWayland
+```
+
+The source migration is in place. Native window acceptance is being checked
+against the compiler's scoped mapped-view callbacks. The earlier CPU
+binary may still require resvg 0.47; rebuilding uses the current generated resvg
+bindings and library, rather than substituting a different ABI under that name.
+
+The [window observer](tests/ariel-window/observe.py) captures animated frames,
+samples native thread CPU use, requests a resize, and closes the real window
+through the compositor. One brief GDB attachment identifies Ariel workers so
+their CPU use is distinguished from driver helper threads. It requires Hyprland,
+`grim`, and `gdb`:
+
+```sh
+python3 tests/ariel-window/observe.py targets/CPU-HelloWayland --seconds 30
+```
+
+## CPU carrier demo
+
+The separate [CPU carrier project](HelloWayland.CpuCarriers.fidproj) renders the
+actual logo through Ariel's scheduling layer and native pthread carriers. It uses
+typed arrays throughout; `Trace.pixel` is byte-identical to the existing shared
+renderer. Native serial/parallel equivalence passed on Linux x86_64 on 2026-09-09
+with 1, 2 and 4 carriers, varied strides and bands, tail and zero work, repeated
+regions, invalid extents, and a deterministic witness that a noncaller rendered
+real pixels.
+
+From this directory, with sibling BAREWire and Fidelity.Platform repositories:
+
+```sh
+/path/to/Composer compile HelloWayland.CpuCarriers.fidproj -o targets/CPU-CarrierDemo
+targets/CPU-CarrierDemo > targets/cpu-carrier-demo.ppm
+magick targets/cpu-carrier-demo.ppm targets/cpu-carrier-demo.png
+```
+
+The demo selects carriers from the process's allowed affinity mask, renders one
+192×224 image, and joins all carriers before writing PPM output. ImageMagick is
+optional; PPM viewers can open the first artifact directly. Native checks can be
+repeated with `python3 tests/ariel-typed/run_native.py /path/to/Composer`.
+The native demo and generated image were verified on 2026-09-09.
+
+The headless result does not establish window presentation or compositor release.
+Those are separate acceptance checks for the animated CPU project above. See the
+[integration status and remaining boundary](docs/multi-core-cpu.md) and
+[native checks](tests/ariel-typed/README.md). The desktop example below records the
+earlier window integration.
 
 ## What This Demonstrates
 

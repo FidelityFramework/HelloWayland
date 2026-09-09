@@ -1,0 +1,17 @@
+module TypedDispatchBounds
+
+[<EntryPoint>]
+let main _ =
+    if BAREWire.Platform.DispatchRegions.contains 40 3 37
+       && not (BAREWire.Platform.DispatchRegions.contains 40 3 38)
+       && BAREWire.Platform.DispatchRegions.fitsByteLength 40 8 5
+       && not (BAREWire.Platform.DispatchRegions.fitsByteLength 40 9 5)
+       && BAREWire.Platform.DispatchRegions.contains 9223372036854775807 9223372036854775807 0
+       && not (BAREWire.Platform.DispatchRegions.contains 9223372036854775807 9223372036854775807 1)
+       && not (BAREWire.Platform.DispatchRegions.contains 10 (0 - 1) 1)
+       && not (BAREWire.Platform.DispatchRegions.fitsByteLength 9223372036854775807 9223372036854775807 2)
+       && not (BAREWire.Platform.DispatchRegions.fitsByteLength 0 0 0)
+       && BAREWire.Platform.DispatchRegions.disjoint 0 3 3 2
+       && not (BAREWire.Platform.DispatchRegions.disjoint 0 4 3 2)
+       && not (BAREWire.Platform.DispatchRegions.disjoint 9223372036854775807 1 0 1) then 0
+    else 1

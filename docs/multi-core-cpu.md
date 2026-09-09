@@ -1,196 +1,187 @@
-# Multi-Core CPU: The Third Realization of the Fill Seam
+# Multi-Core CPU: HelloWayland as Ariel's First Workload
 
-Design note, September 2026. Nothing here is implemented. Companion to
-[shadow-and-substrate.md](./shadow-and-substrate.md), which established that the
-CPU and GPU builds differ by one file in a source list, and to the Ariel
-scheduler design in the clef-lang-site corpus (`docs/design/concurrency/ariel-under-prospero.md`).
+Status: native typed-array serial/parallel equivalence passes, 2026-09-09.
+BAREWire's .NET/JavaScript spatial gates and native scalar guard probe pass.
+The actual glyph renderer passes native pthread equivalence with 1, 2 and 4
+carriers, varied strides/bands/angles, short tails, zero work, repeated regions,
+invalid extents and a deterministic noncaller pixel-rendering witness. The
+complete `pixel` function remains byte-identical to the existing shared source.
 
-## What the two builds already are
+Accepted typed sources live in [`src/Cpu/Typed`](../src/Cpu/Typed), exercised by
+[`tests/ariel-typed`](../tests/ariel-typed/README.md) and selected by the separate
+[`HelloWayland.CpuCarriers.fidproj`](../HelloWayland.CpuCarriers.fidproj) image demo.
+[`HelloWayland.fidproj`](../HelloWayland.fidproj) now selects the typed animated
+CPU host, which reuses Ariel carriers and owns Wayland dispatch and GBM maps on
+the submitting thread. Its actual animated-window acceptance remains pending.
+The native GBM view gate passes eight map/write/unmap cycles, including real
+row padding, exact U32 readback, paired release and owner destruction; an
+out-of-bounds store triggers the generated guard. Headless acceptance alone does not establish
+mapped-display projection, compositor retirement or automatic compiler extraction
+of an arbitrary dispatch's complete access/capture graph.
 
-`Common` is byte-identical across the CPU and GPU builds. The only thing that
-differs is which `Fill` the fidproj compiles, and the two `Fill`s differ in how
-they walk one index domain:
+The raw-pointer Ariel/Fill experiment is preserved under
+[`tests/ariel-prototype`](../tests/ariel-prototype/README.md), outside the production
+source list. Current CCS intentionally removed its `NativePtr` / `nativeptr` /
+raw `nativeint` pointer surface. It must migrate to the normative
+[`CHandle` foreign boundary](../../clef-lang-spec/spec/ffi-boundary.md) and
+compiler-owned array projection. The prototype has no accepted native worker,
+captured-array, pixel-equivalence or lifecycle result; the callback probe and
+hosted spatial checks do not establish end-to-end compiler preservation.
+
+This first step supplies persistent workers and a synchronous region boundary for
+the real logo calculation. Actor/mailbox support and full scheduler conformance
+remain later work.
+
+## Same calculation, another realization
+
+The CPU [fill loop](../src/Cpu/Typed/Fill.clef) walks the same pixel function the GPU
+dispatches:
 
 ```fsharp
-// Cpu/Fill.clef — the map, walked
 while i < n do
-    NativePtr.set out i (int32 (Trace.pixel i table n))
+    Array.set out i (Trace.pixel i table n)
     i <- i + 1
 ```
 
-The GPU build dispatches the identical map with one lane per index. Every line
-of `Gpu/Fill.clef` that is not that map is dispatch plumbing: module load,
-DMA-BUF import, launch-argument packing, the synchronize. The algorithm never
-diverged. So there is no "parallelism style" in the source. There is one map over
-`[0, n)` with a pure body, and two realizations of it. A multi-core CPU build is
-a third realization of the same seam, and `Common` does not change for it.
+`Common.Trace.pixel` reads the frame table and computes a pixel using local
+state. `Fill` owns the output writes. Common geometry, animation and shading
+remain shared. The 16 shadow steps stay unchanged: substrate capacity changes
+rendering time, while changing the calculation can change the image.
 
-The frame loop is one thread and stays one thread: libwayland's dispatch is
-single-threaded by its own rules. The compositor's frame callback is the clock,
-so the app runs at the display rate and pauses under occlusion without a timer.
-That pacing is pipeline parallelism between three processes, and it stays as is.
+As HelloArty supplied concrete cases for BAREWire's platform declarations,
+HelloWayland supplies concrete cases for dispatch regions. The reusable design
+lives in [BAREWire Dispatch Regions](../../BAREWire/docs/13%20Dispatch%20Regions.md);
+the repository work and compiler integration live in
+[Composer's multi-core CPU plan](../../Composer/docs/multi-core-cpu.md).
 
-## Source
+Fidelity.Platform describes the target's memory topology, coherence and access
+capabilities, as it does for a concrete FPGA board. BAREWire describes each
+mapping's element layout, access permissions, extent and lifetime; Ariel uses
+those contracts when admitting work. UMA is a target capability, not by itself
+a guarantee that a particular driver mapping performs no internal copy. The
+CPU host writes directly into its bounded GBM view, avoiding an application
+frame-copy step. Any stronger driver-level guarantee needs platform evidence.
 
-Nothing new. The loop above is the source for the multi-core build. The compiler's
-job is to notice that its body is pure, reads `table` only, writes `out[i]` only,
-and nothing escapes. That is the whole classification.
+## What the shadow defect teaches
 
-Where two things are independent and the developer wants to say so, the syntax is
-`and!`, which Clef inherits from F#'s computation-expression desugaring. `let!`
-means wait for this before the next line. `and!` means these do not depend on each
-other:
+[Shadow and substrate](./shadow-and-substrate.md) records the GPU receiving a
+table whose uploaded prefix excluded the shadow candidate lists. Both builds
+used the same calculation; one received incomplete input.
 
-```fsharp
-let prepare () = async {
-    let! model = Model.buildAsync samples      // independent of the next line
-    and! plate = Svg.rasterizeAsync splashPix  // so both may run at once
-    return model, plate
-}
-```
+The general obligation is to establish that the input view contains every read
+the computation may perform, including indirect table reads. For CPU workers,
+that input must also remain unchanged until all participants release it.
+BAREWire supplies the shared extent/layout vocabulary, and the compiler binds
+those declarations to the actual allocation and access graph.
 
-That is the only concurrency syntax a developer writes for CPU work. No parallel
-keyword, no `Array.Parallel`, no pool, no core count, nothing in the fidproj.
+Table slots 15, 16 and 17, pixel format and shadow geometry remain this
+application's layout. Shared compiler logic must not recognize those slot numbers
+or the name `Trace.pixel`.
 
-## The platform package
+## The actual frame boundary
 
-Threads live in `Fidelity.Platform`, as ordinary Clef, built on the pthread and
-libc bindings Farscape already generated
-(`Fidelity.Platform/CPU/Linux/x86_64/Bindings/Pthread`). One new file,
-`Ariel.clef`, in the hosted x86_64 package. This is the entire mechanism, with
-today's constraints honored: the body is a named function resolved by symbol
-(the same `dlsym` pattern `Common.Host.frameDone` uses), the environment is a
-pointer, and the counters are mutex-guarded because CCS has no atomic intrinsic
-yet.
+The native headless gate operates on separately allocated typed arrays. The
+typed window host instead uses generated `withMappedPixels`, whose callback
+receives a borrowed BAREWire view tied to the actual GBM stride, mapped height
+and ABGR8888 representation. The compiler-owned adapter retains the opaque map
+cookie and unmaps after the callback returns. Typed window state and generated
+foreign callbacks preserve opaque handles and optional results at the boundary.
+The headless carrier gate does not establish these display-boundary operations;
+the mapped-buffer and actual-window gates must establish them separately.
 
-```fsharp
-module Fidelity.Platform.Ariel
+[Cpu.Host.draw](../src/Cpu/Host.clef) now:
 
-// Carrier count read once from the OS, never from the fidproj.
-// N-1: the calling thread is the Nth carrier for the region's duration.
-let private carriers = int (sysconf _SC_NPROCESSORS_ONLN) - 1
+1. Computes the band and calls `Trace.fillTable`.
+2. Maps the selected GBM buffer for CPU writes.
+3. Initializes new storage and calls `MappedFill.render` directly on the view.
+4. Unmaps after the call returns; the frame loop subsequently presents the buffer.
 
-// One pool per process, created on first use.
-// Each carrier: a pthread parked on a condvar, waiting for a region.
-let private pool : Pool = Pool.start carriers
+The parallel region occupies step 3. Its input is the initialized table;
+its output is the mapped band's byte extent. The table's `bandRows * stridePx`
+defines the iteration count, and the target-selected output element size connects
+indices to bytes. Bounds, alias separation and conversion arithmetic must agree
+with the real table and GBM mapping.
 
-/// Run `body lo hi env` over [0, n) across the pool and return when every
-/// index has been written. grain = how many indices one turn takes.
-let region (n: int) (grain: int) (bodySymbol: string) (env: nativeint) : int =
-    let body = dlsym bodySymbol
-    let next = Counter.create 0        // pthread_mutex + int
-    let left = Counter.create n
-    let turn () =
-        let mutable lo = Counter.fetchAdd next grain
-        while lo < n do
-            let hi = min n (lo + grain)
-            call body lo hi env
-            Counter.sub left (hi - lo)
-            lo <- Counter.fetchAdd next grain
-    Pool.post pool turn               // every carrier runs turn
-    turn ()                           // so does the caller
-    Counter.waitZero left             // condvar wait; this is the join
-    0
-```
+Partition the index domain into independent ranges. Row groups are an initial
+policy to measure, not part of the renderer's semantics or a guarantee of
+cache-line separation. Each pixel is written exactly once. Regions with zero work,
+a short final partition or one available carrier must have defined behavior.
 
-About sixty lines with `Pool` and `Counter`. The MCU single-core package has the
-same `region` whose body is the plain loop. The GPU package's `region` is the
-dispatch plumbing currently in `Gpu/Fill.clef`, relocated to where it belongs;
-when that happens `Fill` collapses into `Common` and the fidproj's platform
-selects the realization.
+A completed pixel count is not a sufficient join: workers may still access their
+environment or counters. `MappedFill.render` may return only after their writes are
+visible and every participant has relinquished the dispatch state. The host can
+then unmap according to the GBM contract. Reusing the underlying scanout buffer
+additionally requires its external consumer's release; a worker join does not
+stand in for that release.
 
-The vocabulary is the corpus's own. A region splits into turns; a turn is what
-Ariel dispatches. No borrowed executor terms.
+The existing Wayland owner thread remains the owner of window and presentation
+operations. Keeping it single-threaded is this application's boundary; Wayland
+also supports [per-thread event queues](https://wayland.freedesktop.org/docs/html/apb.html).
 
-## What the compiler does
+## Ariel's role
 
-Nothing in MLIR. Baker gets one saturation recipe: a loop over `[0, n)` whose body
-is pure and whose only write is `out[i]` becomes a body function plus a call to
-the platform's `region` with `n`, a row-aligned grain, and an environment frame
-holding `out`, `table`, `n`. Alex witnesses that as a `func.func` and a
-`func.call`, both already in its vocabulary. The environment frame is the C-01
-byte frame. No `scf.forall`, no outlining pass, no parallel op anywhere. The
-independence fact is consumed in the PSG and never reaches an op, so the
-crossing record stays on the graph.
+[Ariel Under Prospero](../../clef-lang-site/hugo/content/docs/design/concurrency/ariel-under-prospero.md)
+and [Surfacing the Scheduler](../../clef-lang-site/hugo/content/blog/surfacing-the-scheduler.md)
+establish the separation: compiler structure establishes eligibility; Ariel
+chooses dispatch order under resource scarcity. Olivier retains actor semantics,
+and Prospero retains supervision policy and lifecycle authority.
 
-Until the recipe exists, `Cpu/Fill.clef` makes the call by hand. This is inside
-the substrate file, not in `Common`:
+Ariel's clients are Prospero and the compiler. For this first step the CPU
+`Fill` substrate adapter explicitly calls the internal region mechanism, just as
+the GPU adapter calls its dispatch mechanism. The rendering algorithm remains in
+`Common`; no actor or mailbox surface is introduced. General automatic insertion
+by Baker follows later. Shared layout and boundary obligations apply to the
+explicit call as well.
 
-```fsharp
-// Cpu/Fill.clef, interim: explicit until Baker inserts it
-let rows (lo: int) (hi: int) (env: nativeint) : unit =
-    let e = NativePtr.ofNativeInt<nativeint> env
-    let out = NativePtr.ofNativeInt<int32> (NativePtr.get e 0)
-    let table = ...                    // from e[1]
-    let n = int (NativePtr.get e 2)
-    for i in lo .. hi - 1 do
-        NativePtr.set out i (int32 (Trace.pixel i table n))
+The current scheduling layer uses persistent pthread carriers with mutex and
+condition-variable synchronization. Generated typed declarations, opaque handles,
+native callbacks and captured-array/record lowering have native acceptance gates;
+the renderer uses an ordinary typed closure over its arrays. Native carrier tests
+also cover partial startup cleanup, repeated regions, callback failure, delayed
+participant retirement and shutdown joins. The earlier estimate of approximately
+sixty lines omitted spatial checks, initialization failures, participant
+retirement, repeated-region state and teardown.
 
-let frame table ctx fill mapped stride =
-    ... // pack out, table, n into env, as today's Fill packs launch args
-    Ariel.region n (stridePx * 4) "Fill.rows" env
-```
+The image demo selects a bounded carrier count from the calling process's allowed
+affinity mask and joins before emitting output. It renders one image; the present
+image adapter constructs an escaping closure per call, whose storage is retained
+by the compiler. The animated host instead lends its GBM view to a synchronous
+region with a scoped work closure; no view remains in persistent session state.
+The separate reusable `TypedFill.Session` native
+gate passed 1,200 changing frames on four carriers, resize/rejected-size cases,
+and periodic exact serial comparison, with stable resident memory. That gate
+uses small frames and does not substitute for sustained window observation.
 
-## What runs per frame
+The native image demo was also compiled and executed successfully on 2026-09-09.
+It emitted the complete 192×224 PPM image (10,228 nonblack pixels, 3,011 colors),
+retained locally at `targets/cpu-carrier-demo.ppm`, with a lossless PNG conversion
+at `targets/cpu-carrier-demo.png`. These are generated, ignored artifacts. The
+reproducible compile/run commands are in the [README](../README.md#cpu-carrier-demo).
 
-The frame loop builds the table, calls `region`, helps until `next` passes `n`,
-waits on the condvar for the stragglers, commits. Between frames it is back in
-`wl_display_dispatch` exactly as now. Workers pull four-row ranges, write their
-slice of the mapped buffer, and pull again. Rows are stride-aligned, so two
-carriers never touch the same cache line. The mutex unlock on `left` publishes
-each carrier's writes and the condvar wake acquires them, so no fence is emitted
-anywhere. When `left` hits zero the main thread commits. That commit is the
-crossing; there is one per frame.
+The [specification](../../clef-lang-spec/spec/scheduler-contract.md) describes the
+full scheduler, including its simulated conformance path. That whole surface is
+not required for this milestone. Use a bounded region lifecycle harness and native
+worker checks, with the hosted assumptions and implemented guarantees documented.
+The acceptance target is correct multi-core rendering. Actor fairness,
+supervision, mailbox admission and full scheduler replay remain future scope.
 
-Thread accounting:
+## What stays common and what this demo validates
 
-- **Pool:** `sysconf(_SC_NPROCESSORS_ONLN) - 1`, from the affinity mask. On the
-  Strix Halo box that is 31 logical; SMT siblings help less than full cores,
-  which is fine for a compute-bound tracer.
-- **UI thread:** owns the Wayland connection and is the Nth carrier during the
-  region. Idling it while N-1 workers paint wastes a core and buys nothing,
-  because the frame loop cannot dispatch events until the frame is painted.
-- **Workers:** never touch Wayland, never allocate, only write their slice.
+| Shared feature | HelloWayland acceptance case |
+| --- | --- |
+| Complete input view | Reject a table extent that omits the shadow candidate lists |
+| Disjoint, bounded output partitions | Reject overlap, gaps and out-of-range pixel writes |
+| Environment layout and publication | Workers see the same complete initialized table and correct captured values |
+| Completion and retirement | A delayed worker cannot access reclaimed counters, environment or mapping |
+| Admission and failure handling | Partial startup or rejected work cannot present an incomplete frame |
+| Consumer lifetime | Resize, buffer reuse and teardown respect both worker and compositor use |
+| Substrate-independent calculation | Serial and multi-core CPU produce identical bytes for the same frame inputs |
 
-The tracer path was checked for this: no module-level mutable state and no
-allocation in `Trace.pixel` or the geometry it calls, so it is reentrant as
-written.
+Measure table preparation, pixel work, join and presentation separately. Use fixed
+input tables and several worker counts, with the same compiler settings and shadow
+steps. The existing roughly 5–6 fps account is historical evidence; near-linear
+scaling and display-rate rendering are hypotheses to test.
 
-The one case that wants the UI thread out of the region entirely is handling
-input and resize *during* a frame's paint rather than between frames. That needs
-the join to be a suspension instead of a blocking wait: the frame loop does
-`let!` on the region's completion and keeps dispatching until the resume arrives.
-That is the DCont crossing as designed, requires the continuation state machine,
-and is not worth it here: with 32 carriers the region is low single-digit
-milliseconds against a 16.7 ms frame.
-
-## Expected result
-
-The tracer is compute-bound with disjoint row writes and a read-only table, so it
-scales close to core count until it hits vsync. The CPU build goes from about
-6 fps on one core toward the display rate.
-
-## Work list
-
-| Item | Where | Size |
-|---|---|---|
-| `sysconf` binding | `Fidelity.libc` via Farscape | minutes |
-| `Ariel.clef`: pool, counters, `region` | `Fidelity.Platform/CPU/Linux/x86_64` | ~60 lines |
-| `Cpu/Fill.clef` interim call | this repo | ~15 lines |
-| Region recipe in Baker | Composer | later; removes the interim call |
-| Atomics as CCS intrinsics | clef | later; replaces the mutex counters |
-| `FnPtr<'F>` | clef | later; replaces the symbol string |
-
-The first three deliver the frame rate. The last three are already on the
-roadmap under other names. Nothing enters MLIR, no pool or core count appears in
-source or fidproj, and `Common` stays byte-identical across the CPU, multi-core
-CPU, and GPU builds.
-
-## What this is not
-
-It is the foundation Ariel, not the six-clause one. Its assumption manifest would
-read `ControlPlaneImmunity = Assumed "the caller"`, no turn budget because a turn
-of a pure map is statically bounded, admission discharged by the bounded turn
-queue, and determinism trivially discharged because the combine is order-free.
-Supervision and budgets arrive with Prospero when something long-lived needs
-them. Nothing in this application does.
+An asynchronous return to the Wayland event loop during rendering would require
+the DCont suspension and completion path. The initial synchronous region preserves
+the existing host shape and provides evidence for that later integration.

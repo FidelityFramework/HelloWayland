@@ -1,0 +1,40 @@
+/// Real native owner for the borrowed-view write and retirement gates.
+module MappedPixelsProbe
+
+open Fidelity.GBM.Native
+
+let run (outOfBounds: bool) : int =
+    let fd = Fidelity.Display.Native.openRenderNode "/dev/dri/renderD128"
+    if fd < 0 then 1
+    else
+    match gbm_create_device fd with
+    | None -> Fidelity.Display.Native.close fd |> ignore; 2
+    | Some device ->
+        let outcome =
+            match gbm_bo_create device 16 8 0x34324241 0x14 with
+            | None -> 3
+            | Some bo ->
+                let mutable result = 0
+                let mutable frame = 0
+                while frame < 8 && result = 0 do
+                    let color = 4278190080 + frame
+                    result <- withMappedPixels bo 0 0 16 8 2 (fun view ->
+                        let stride = BorrowedView.stride view
+                        let capacity = BorrowedView.length view
+                        if stride < 64 || stride % 4 <> 0 || capacity <= 0
+                           || capacity / 8 <> stride / 4 || capacity % 8 <> 0 then 4
+                        elif outOfBounds then
+                            BorrowedView.set view capacity 0
+                            5
+                        else
+                            let mutable index = 0
+                            while index < capacity do
+                                BorrowedView.set view index (color + index % 65536)
+                                index <- index + 1
+                            0)
+                    frame <- frame + 1
+                gbm_bo_destroy bo
+                result
+        gbm_device_destroy device
+        Fidelity.Display.Native.close fd |> ignore
+        outcome

@@ -1,0 +1,17 @@
+[package]
+name = "HelloWayland.MappedCarriers"
+version = "0.1.0"
+
+[compilation]
+target = "cpu"
+
+[dependencies]
+platform = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
+gbm = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.GBM.Native.fidproj" }
+display = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Display.Native.fidproj" }
+ariel = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Ariel.fidproj" }
+
+[build]
+sources = ["MappedCarriers.clef"]
+output = "mapped-carriers"
+output_kind = "console"

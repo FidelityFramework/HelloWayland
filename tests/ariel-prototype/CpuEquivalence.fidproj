@@ -1,0 +1,32 @@
+[package]
+name = "HelloWayland.ArielRawPointerPrototype"
+version = "0.1.0"
+description = "Unsupported raw-pointer experiment awaiting typed CHandle/array boundary migration"
+
+[compilation]
+target = "cpu"
+
+[platform]
+runtime_model = "libc"
+os = "linux"
+arch = "x86_64"
+word_size = 64
+
+[dependencies]
+platform = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
+ariel = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Experimental/Ariel/Fidelity.Ariel.Experimental.fidproj" }
+
+[build]
+sources = [
+    "../../src/Common/Fixed.clef",
+    "../../src/Common/Geometry.clef",
+    "../../src/Common/Trace.clef",
+    "../../src/Common/Model.clef",
+    "Fill.clef",
+    "CpuEquivalence.clef"
+]
+output = "cpu-equivalence"
+output_kind = "console"
+
+[link]
+libraries = ["pthread"]

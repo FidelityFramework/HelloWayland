@@ -1,0 +1,4 @@
+module MappedPixelsBounds
+
+[<EntryPoint>]
+let main _ = MappedPixelsProbe.run true

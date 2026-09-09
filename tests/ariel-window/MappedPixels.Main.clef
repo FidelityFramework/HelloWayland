@@ -1,0 +1,7 @@
+module MappedPixelsMain
+
+[<EntryPoint>]
+let main _ =
+    let result = MappedPixelsProbe.run false
+    if result = 0 then Console.writeln "mapped GBM pixels: passed" else ()
+    result

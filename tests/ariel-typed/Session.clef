@@ -1,0 +1,61 @@
+/// Persistent frame session; the animated host uses this same create/render path.
+module TypedRendererSession
+
+let private checkPixels (table: int array) (pixels: int array) (count: int) : bool =
+    let mutable valid = true
+    let mutable i = 0
+    while i < count && valid do
+        valid <- Array.get pixels i = Common.Trace.pixel i table count
+        i <- i + 1
+    valid
+
+let private checksum (pixels: int array) : int =
+    let mutable result = 0
+    let mutable i = 0
+    while i < Array.length pixels do
+        result <- result + (Array.get pixels i &&& 16777215)
+        i <- i + 1
+    result
+
+[<EntryPoint>]
+let main _ =
+    let width = 32
+    let height = 40
+    let samples = Array.zeroCreate<int> 3072
+    let modelCount = Common.Model.build samples
+    let required = Common.Trace.tableSize modelCount
+    let table = Array.zeroCreate<int> required
+    let pixels = Array.zeroCreate<int> (width * height)
+    let session = TypedFill.create table required pixels width height
+    let startup = Fidelity.Ariel.Region.start 4
+    if modelCount <= 3 || startup <> 0 then 1
+    else
+        let mutable status = 0
+        let mutable frame = 0
+        let mutable firstChecksum = 0
+        let mutable changed = false
+        while frame < 1200 && status = 0 do
+            let currentWidth = if (frame / 100) % 2 = 0 then width else 24
+            let currentHeight = if (frame / 100) % 2 = 0 then height else 32
+            status <- TypedFill.resize session currentWidth currentHeight
+            if TypedFill.resize session (width + 1) height = 0 then status <- 4 else ()
+            let angle = ((frame % 81) - 40) * 32
+            Common.Trace.fillTable table samples modelCount currentWidth currentHeight 0 0
+                (Common.Fixed.cosSmall12 angle) (Common.Fixed.sinSmall12 angle)
+                currentWidth 0 0 currentWidth currentHeight 0 currentHeight (Common.Model.anchorCount ()) 1024 16
+            if status = 0 then status <- TypedFill.render session 37 else ()
+            if frame % 100 = 0 && not (checkPixels table pixels (currentWidth * currentHeight)) then status <- 2 else ()
+            let value = checksum pixels
+            if frame = 0 then firstChecksum <- value
+            elif value <> firstChecksum then changed <- true
+            else ()
+            frame <- frame + 1
+            if frame = 32 then Console.writeln "SESSION_WARM" else ()
+            if frame = 400 || frame = 800 then Console.writeln "SESSION_SAMPLE" else ()
+        let joined = Fidelity.Ariel.Region.stop ()
+        if status <> 0 then status
+        elif joined <> 0 then joined
+        elif not changed then 3
+        else
+            Console.writeln "typed persistent renderer session: passed"
+            0

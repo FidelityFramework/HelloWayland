@@ -1,0 +1,3 @@
+# Native compiler intermediates and Python bytecode are local gate artifacts.
+targets/
+__pycache__/

@@ -1,0 +1,42 @@
+/// Component checks for the animated host's unchanged math and typed pixels.
+module WindowCompositionProbe
+
+[<EntryPoint>]
+let main _ =
+    let samples: int array = Array.zeroCreate 3072
+    let count = Common.Model.build samples
+    let ctx: int array = Array.zeroCreate 16
+    CpuLayout.configure samples count ctx 750 900
+    let mutable result = 0
+    if count <= 3 || Array.get ctx 14 <> 145 || Array.get ctx 15 <> 266 then result <- 1 else ()
+    if Array.get ctx 0 < 0 || Array.get ctx 1 < 0
+       || Array.get ctx 2 > 750 || Array.get ctx 3 > 900 then result <- 2 else ()
+    if Common.Anim.angleAt 0 <> (0 - 2145) || Common.Anim.angleAt 1000 <> 0
+       || Common.Anim.angleAt 2000 <> 2145 || Common.Anim.angleAt 3000 <> 0
+       || Common.Anim.angleAt 4000 <> (0 - 2145) then result <- 3 else ()
+    let splash: int array = Array.zeroCreate (460 * 700 * 4)
+    let source = (460 + 1) * 4
+    Array.set splash source 128
+    Array.set splash (source + 1) 64
+    Array.set splash (source + 2) 32
+    Array.set splash (source + 3) 128
+    let pixels: int array = Array.zeroCreate 15
+    if CpuComposition.seed pixels 4 3 5 splash (0 - 1) (0 - 1) <> 0 then result <- 4 else ()
+    if Array.get pixels 0 <> 4279246912 then result <- 5 else ()
+    let mutable i = 1
+    while i < 15 do
+        if Array.get pixels i <> 4278190080 then result <- 6 else ()
+        i <- i + 1
+    // A truncated destination is rejected before the first store.
+    Array.set pixels 0 123
+    if CpuComposition.seed pixels 4 4 5 splash 0 0 <> 22 || Array.get pixels 0 <> 123 then result <- 7 else ()
+    // A borrowed destination can revoke/reject a store. Propagate that result
+    // and stop before either subsequent background writes or splash writes.
+    let writes: int array = Array.zeroCreate 1
+    let rejectingStore = fun index _value ->
+        if index >= 3 then 5
+        else Array.set writes 0 (Array.get writes 0 + 1); 0
+    if CpuComposition.seedWithStore 15 rejectingStore 4 3 5 splash 0 0 <> 5
+       || Array.get writes 0 <> 3 then result <- 8 else ()
+    if result = 0 then Console.writeln "typed window composition: passed" else ()
+    result

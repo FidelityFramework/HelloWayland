@@ -1,0 +1,70 @@
+/// Common.Anim — the pivot curve, shared by both substrates
+///
+/// A smoothstep-eased triangle wave: zero angular velocity at the extremes,
+/// fastest through centre. Both hosts drive their frame from this one
+/// definition, so the two binaries animate identically.
+module Common.Anim
+
+open Common.Fixed
+
+/// Pivot angle at elapsed ms: smoothstep-eased triangle wave.
+/// Full travel between extremes takes 2 s (4 s round trip), amplitude
+/// +-30 deg (returns Q12 radians, +-2145).
+let angleAt (elapsedMs: int) : int =
+    let ph = elapsedMs % 4000
+    let t10 = if ph < 2000 then (ph * 1024) / 2000 else ((4000 - ph) * 1024) / 2000
+    let e10 = Fixed.smoothstep10 t10
+    0 - 2145 + (2 * 2145 * e10) / 1024
+
+/// Conservative screen bounding box of the glyph over the whole
+/// oscillation. The perspective divide amplifies both the radii and each
+/// sphere center's offset from the camera/pivot axes by up to
+/// s12max/4096 ~= 1.134 at the +-30 deg extremes, so both get a 16.7%
+/// margin (offset/6) on top of fixed padding. Reads the origin from
+/// ctx[6..7] and writes the clip rect into ctx[0..3] (window px,
+/// unclamped — the caller clamps to the window).
+let boundsOf (samples: int array) (count: int) (ctx: int array) (k12: int) : unit =
+    let ox8 = (Array.get ctx 6)
+    let oy8 = (Array.get ctx 7)
+    let ax8 = ox8 + (k12 * 17423) / 4096
+    let ay8 = oy8 + (k12 * 17152) / 4096
+    let mutable minX = 1000000
+    let mutable minY = 1000000
+    let mutable maxX = 0 - 1000000
+    let mutable maxY = 0 - 1000000
+    // The smooth union can place the surface up to k/4 outside the hard
+    // union, so every bound has to allow for it or the fillet is cropped at
+    // the glyph's edge. Trace.fillTable widens its tile bboxes by the same
+    // quantity, computed the same way — the two must agree, or a pixel can
+    // be inside the clip rect and outside every tile.
+    let mutable kMax = 0
+    let mutable q = 0
+    while q < count do
+        let kq = (Array.get samples (q * 6 + 3))
+        if kq > kMax then kMax <- kq else ()
+        q <- q + 1
+    let kPad = kMax / 4
+    let mutable k = 0
+    while k < count do
+        let x8 = (Array.get samples (k * 6 + 0))
+        let y8 = (Array.get samples (k * 6 + 1))
+        let r8 = (Array.get samples (k * 6 + 2))
+        let sx8 = ox8 + (k12 * x8) / 4096
+        let sy8 = oy8 + (k12 * y8) / 4096
+        let rp8 = ((r8 + kPad) * k12) / 4096
+        let ext8 = rp8 + rp8 / 6            // radius * 1.167 perspective margin
+        let dxa8 = if sx8 > ax8 then sx8 - ax8 else ax8 - sx8
+        let dya8 = if sy8 > ay8 then sy8 - ay8 else ay8 - sy8
+        let cx = sx8 / 256
+        let cy = sy8 / 256
+        let ex = ext8 / 256 + (dxa8 / 6) / 256 + 1
+        let ey = ext8 / 256 + (dya8 / 6) / 256 + 1
+        if cx - ex < minX then minX <- cx - ex else ()
+        if cy - ey < minY then minY <- cy - ey else ()
+        if cx + ex > maxX then maxX <- cx + ex else ()
+        if cy + ey > maxY then maxY <- cy + ey else ()
+        k <- k + 1
+    Array.set ctx 0 ((minX - 6))
+    Array.set ctx 1 ((minY - 6))
+    Array.set ctx 2 ((maxX + 7))
+    Array.set ctx 3 ((maxY + 7))

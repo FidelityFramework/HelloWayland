@@ -1,0 +1,116 @@
+/// A real write-only GBM mapping borrowed by persistent Ariel carriers.
+module MappedCarriersProbe
+
+open Fidelity.GBM.Native
+open Fidelity.Pthread.Types
+
+// Allocated once for the complete gate. The caller waits for a worker's first
+// completed chunk, so a successful frame proves noncaller mapped writes.
+type private Witness = {
+    Mutex: CHandle<pthread_mutex_t>
+    Condition: CHandle<pthread_cond_t>
+    Seen: int array
+    Caller: int
+}
+
+let private checkedSync (status: int) : unit =
+    if status <> 0 then Fidelity.Pthread.Storage.exitProcess 127 else ()
+
+let private observed (state: Witness) : unit =
+    let current = Fidelity.Pthread.Thread.pthread_self ()
+    checkedSync (Fidelity.Pthread.Mutex.pthread_mutex_lock state.Mutex)
+    if Fidelity.Pthread.Thread.pthread_equal current state.Caller = 0 then
+        Array.set state.Seen 0 1
+        checkedSync (Fidelity.Pthread.Cond.pthread_cond_broadcast state.Condition)
+    else
+        while Array.get state.Seen 0 = 0 do
+            checkedSync (Fidelity.Pthread.Cond.pthread_cond_wait state.Condition state.Mutex)
+    checkedSync (Fidelity.Pthread.Mutex.pthread_mutex_unlock state.Mutex)
+
+let private frames (state: Witness) : int =
+    let fd = Fidelity.Display.Native.openRenderNode "/dev/dri/renderD128"
+    if fd < 0 then 1
+    else
+    match gbm_create_device fd with
+    | None -> Fidelity.Display.Native.close fd |> ignore; 2
+    | Some device ->
+        let outcome =
+            match gbm_bo_create device 16 8 0x34324241 0x14 with
+            | None -> 3
+            | Some bo ->
+                let mutable result = 0
+                let mutable frame = 0
+                while frame < 64 && result = 0 do
+                    let color = 4278190080 + frame
+                    Array.set state.Seen 0 0
+                    result <- withMappedPixels bo 0 0 16 8 2 (fun view ->
+                        let stride = BorrowedView.stride view
+                        let capacity = BorrowedView.length view
+                        if stride < 64 || stride % 4 <> 0 || capacity <= 0
+                           || capacity / 8 <> stride / 4 || capacity % 8 <> 0 then 4
+                        else
+                            let work = fun (lo: int) (hi: int) ->
+                                if lo < 0 || hi < lo || hi > BorrowedView.length view then 5
+                                else
+                                    let mutable index = lo
+                                    while index < hi do
+                                        BorrowedView.set view index (color + index % 65536)
+                                        index <- index + 1
+                                    observed state
+                                    0
+                            let dispatched = Fidelity.Ariel.Region.run capacity 17 work
+                            if dispatched <> 0 then dispatched
+                            elif Array.get state.Seen 0 <> 1 then 6
+                            else 0)
+                    frame <- frame + 1
+                gbm_bo_destroy bo
+                result
+        gbm_device_destroy device
+        Fidelity.Display.Native.close fd |> ignore
+        outcome
+
+let private withWitness () : int =
+    match Fidelity.Pthread.Storage.mallocMutex pthread_mutex_t.Size with
+    | None -> 12
+    | Some mutex ->
+        match Fidelity.Pthread.Storage.mallocCond pthread_cond_t.Size with
+        | None -> Fidelity.Pthread.Storage.freeMutex mutex; 12
+        | Some condition ->
+            let initialized = Fidelity.Pthread.Mutex.pthread_mutex_init mutex None
+            if initialized <> 0 then
+                Fidelity.Pthread.Storage.freeCond condition
+                Fidelity.Pthread.Storage.freeMutex mutex
+                initialized
+            else
+                let conditionInitialized = Fidelity.Pthread.Cond.pthread_cond_init condition None
+                if conditionInitialized <> 0 then
+                    checkedSync (Fidelity.Pthread.Mutex.pthread_mutex_destroy mutex)
+                    Fidelity.Pthread.Storage.freeCond condition
+                    Fidelity.Pthread.Storage.freeMutex mutex
+                    conditionInitialized
+                else
+                    let state = {
+                        Mutex = mutex
+                        Condition = condition
+                        Seen = Array.zeroCreate<int> 1
+                        Caller = Fidelity.Pthread.Thread.pthread_self ()
+                    }
+                    let result = frames state
+                    checkedSync (Fidelity.Pthread.Cond.pthread_cond_destroy condition)
+                    checkedSync (Fidelity.Pthread.Mutex.pthread_mutex_destroy mutex)
+                    Fidelity.Pthread.Storage.freeCond condition
+                    Fidelity.Pthread.Storage.freeMutex mutex
+                    result
+
+[<EntryPoint>]
+let main _ =
+    let started = Fidelity.Ariel.Region.start 4
+    if started <> 0 then started
+    else
+        let result = withWitness ()
+        let stopped = Fidelity.Ariel.Region.stop ()
+        if result <> 0 then result
+        elif stopped <> 0 then stopped
+        else
+            Console.writeln "mapped carrier pixels: passed"
+            0

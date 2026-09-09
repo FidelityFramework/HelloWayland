@@ -1,0 +1,69 @@
+/// Test-only observation that an OS worker completed the real pixel calculation.
+/// The caller cannot drain the work before a worker runs: its completion hook
+/// waits for the worker's hook. No sleeps, alternate renderer or pointer casts.
+module WorkerWitness
+
+open Fidelity.Pthread.Types
+
+type private State = {
+    Mutex: CHandle<pthread_mutex_t>
+    Condition: CHandle<pthread_cond_t>
+    Seen: int array
+    Caller: int
+}
+
+let private sync (status: int) : unit =
+    if status <> 0 then Fidelity.Pthread.Storage.exitProcess 127 else ()
+
+let private completed (state: State) (_lo: int) (_hi: int) : unit =
+    let current = Fidelity.Pthread.Thread.pthread_self ()
+    sync (Fidelity.Pthread.Mutex.pthread_mutex_lock state.Mutex)
+    if Fidelity.Pthread.Thread.pthread_equal current state.Caller = 0 then
+        Array.set state.Seen 0 1
+        sync (Fidelity.Pthread.Cond.pthread_cond_broadcast state.Condition)
+    else
+        while Array.get state.Seen 0 = 0 do
+            sync (Fidelity.Pthread.Cond.pthread_cond_wait state.Condition state.Mutex)
+    sync (Fidelity.Pthread.Mutex.pthread_mutex_unlock state.Mutex)
+
+/// Requires a started pool with at least two carriers and more than one chunk.
+/// The normal frame guards and renderer execute before each completion hook.
+let frame (table: int array) (requiredTableElements: int) (pixels: int array)
+          (stride: int) (height: int) (chunk: int) : int =
+    match Fidelity.Pthread.Storage.mallocMutex pthread_mutex_t.Size with
+    | None -> 12
+    | Some mutex ->
+        match Fidelity.Pthread.Storage.mallocCond pthread_cond_t.Size with
+        | None ->
+            Fidelity.Pthread.Storage.freeMutex mutex
+            12
+        | Some condition ->
+            let initialized = Fidelity.Pthread.Mutex.pthread_mutex_init mutex None
+            if initialized <> 0 then
+                Fidelity.Pthread.Storage.freeCond condition
+                Fidelity.Pthread.Storage.freeMutex mutex
+                initialized
+            else
+                let conditionInitialized = Fidelity.Pthread.Cond.pthread_cond_init condition None
+                if conditionInitialized <> 0 then
+                    sync (Fidelity.Pthread.Mutex.pthread_mutex_destroy mutex)
+                    Fidelity.Pthread.Storage.freeCond condition
+                    Fidelity.Pthread.Storage.freeMutex mutex
+                    conditionInitialized
+                else
+                    let state = {
+                        Mutex = mutex
+                        Condition = condition
+                        Seen = Array.zeroCreate<int> 1
+                        Caller = Fidelity.Pthread.Thread.pthread_self ()
+                    }
+                    let status = TypedFill.frameWithCompletion table requiredTableElements pixels
+                                     stride height chunk (fun lo hi -> completed state lo hi)
+                    let witnessed = Array.get state.Seen 0
+                    sync (Fidelity.Pthread.Cond.pthread_cond_destroy condition)
+                    sync (Fidelity.Pthread.Mutex.pthread_mutex_destroy mutex)
+                    Fidelity.Pthread.Storage.freeCond condition
+                    Fidelity.Pthread.Storage.freeMutex mutex
+                    if status <> 0 then status
+                    elif witnessed = 1 then 0
+                    else 1

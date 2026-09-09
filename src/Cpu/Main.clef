@@ -1,0 +1,7 @@
+/// Animated CPU edition; GPU/Common.Host remain independently selectable.
+module Main
+
+[<EntryPoint>]
+let main _ =
+    Console.writeln "CPU-HelloWayland: Common.Trace on persistent pthread carriers"
+    CpuHost.run "CPU-HelloWayland"

@@ -1,0 +1,20 @@
+[package]
+name = "HelloWayland.TypedSerialRenderer"
+version = "0.1.0"
+
+[compilation]
+target = "cpu"
+
+[dependencies]
+platform = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
+
+[build]
+sources = [
+    "../../src/Common/Fixed.clef",
+    "../../src/Common/Geometry.clef",
+    "../../src/Cpu/Typed/Trace.clef",
+    "../../src/Cpu/Typed/Model.clef",
+    "Serial.clef"
+]
+output = "typed-serial-renderer"
+output_kind = "console"

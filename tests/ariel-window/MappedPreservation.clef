@@ -1,0 +1,37 @@
+/// Seed once, then preserve untouched pixels across native mapping scopes.
+module MappedPreservation
+
+open Fidelity.GBM.Native
+
+[<EntryPoint>]
+let main argv =
+    let fd = Fidelity.Display.Native.openRenderNode "/dev/dri/renderD128"
+    if fd < 0 then 1
+    else
+    match gbm_create_device fd with
+    | None -> Fidelity.Display.Native.close fd |> ignore; 2
+    | Some device ->
+        let outcome =
+            match gbm_bo_create device 16 8 0x34324241 0x14 with
+            | None -> 3
+            | Some bo ->
+                let mutable result = 0
+                let mutable frame = 0
+                while frame < 8 && result = 0 do
+                    result <- withMappedPixels bo 0 0 16 8 3 (fun view ->
+                        let capacity = BorrowedView.length view
+                        if capacity <= 0 then 4
+                        else
+                            if frame = 0 then
+                                let mutable index = 0
+                                while index < capacity do
+                                    BorrowedView.set view index (4278190080 + index % 65536)
+                                    index <- index + 1
+                            else BorrowedView.set view 0 (4278190080 + frame)
+                            0)
+                    frame <- frame + 1
+                gbm_bo_destroy bo
+                result
+        gbm_device_destroy device
+        Fidelity.Display.Native.close fd |> ignore
+        outcome
