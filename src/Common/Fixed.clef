@@ -18,17 +18,14 @@ let clamp (v: int) (lo: int) (hi: int) : int =
     else v
 
 /// Linear interpolation from a to b by t8 in Q8 (0..256).
-let lerp8 (a: int) (b: int) (t8: int) : int =
+let lerp8 a b t8 =
     a + ((b - a) * t8) / 256
 
 /// Integer square root (floor) via Newton iteration. n >= 0.
 /// Polynomial smooth minimum over a window k.
 ///
 /// Where a and b are further apart than k this is exactly min. Where they
-/// are close it dips *below* both, most at a = b, by k/4. That dip is the
-/// whole point: folding surface depths with this instead of min turns the
-/// crease where two surfaces meet into a fillet, because material is added
-/// in the valley and the term decays to nothing outside the window — so a
+/// are close it dips *below* both, most at a = b, by k/4. A
 /// join can be rounded without the surfaces bulging anywhere else.
 let smin (a: int) (b: int) (k: int) : int =
     if k <= 0 then (if a < b then a else b)

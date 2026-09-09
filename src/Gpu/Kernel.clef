@@ -1,9 +1,8 @@
-/// Gpu.Kernel — the device dispatch entry
-///
-/// The GPU backend leg looks for a function named `kernel` and wraps it in
-/// a gpu.func. That is all this file is: the name the leg binds to. Every
-/// pixel it produces comes from Common.Trace.pixel — the same definition
-/// the CPU build walks — so the two renderings cannot drift apart.
+// Gpu.Kernel — the device dispatch entry
+//
+// The GPU backend leg looks for a function named `kernel` and wraps it in
+// a gpu.func. Every pixel it produces comes from Common.Trace.pixel 
+// the same definition the CPU build uses. The two renderings cannot drift apart.
 module Gpu.Kernel
 
 open Common.Trace
