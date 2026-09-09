@@ -15,16 +15,19 @@ boundaries. The GPU project continues to select its separate implementation.
 targets/CPU-HelloWayland
 ```
 
-The source migration is in place. Native window acceptance is being checked
-against the compiler's scoped mapped-view callbacks. The earlier CPU
-binary may still require resvg 0.47; rebuilding uses the current generated resvg
-bindings and library, rather than substituting a different ABI under that name.
+The actual animated window passed native acceptance on 2026-09-09: 32 participants
+selected from process affinity, CPU activity in all 31 Ariel worker threads,
+resize to 820×960, and normal close with carrier joins. Pixel comparisons confirm
+the static caption and panel remain unchanged while the glyph animates. Rendering
+writes directly into scoped BAREWire views of GBM storage; native READ_WRITE
+acquisition preserves untouched chrome while callbacks retain WriteOnly views.
+Rebuilding uses the current generated resvg 0.48 binding and library.
 
 The [window observer](tests/ariel-window/observe.py) captures animated frames,
 samples native thread CPU use, requests a resize, and closes the real window
 through the compositor. One brief GDB attachment identifies Ariel workers so
 their CPU use is distinguished from driver helper threads. It requires Hyprland,
-`grim`, and `gdb`:
+`grim`, and `gdb` (the control harness uses Hyprland 0.55+ Lua dispatch):
 
 ```sh
 python3 tests/ariel-window/observe.py targets/CPU-HelloWayland --seconds 30

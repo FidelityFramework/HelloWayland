@@ -6,7 +6,9 @@ access in `fillTable`; the complete `pixel` implementation is byte-identical to 
 existing shared renderer. Its `Model.clef` replaces control/sample native-pointer
 storage with typed arrays, retaining the glyph data and geometric computation.
 Fixed-point and geometry helpers are compiled directly from the shared source.
-The existing Wayland and GPU project source lists remain unchanged.
+The main Wayland CPU project now selects the typed mapped-view host; the GPU
+source list retains its separate implementation. Actual animation, worker CPU,
+resize and normal close/join pass in the [window gates](../ariel-window/observe.py).
 
 ```sh
 python3 tests/ariel-typed/verify_sources.py

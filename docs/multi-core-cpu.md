@@ -1,6 +1,6 @@
 # Multi-Core CPU: HelloWayland as Ariel's First Workload
 
-Status: native typed-array serial/parallel equivalence passes, 2026-09-09.
+Status: actual animated CPU window and native serial/parallel gates pass, 2026-09-09.
 BAREWire's .NET/JavaScript spatial gates and native scalar guard probe pass.
 The actual glyph renderer passes native pthread equivalence with 1, 2 and 4
 carriers, varied strides/bands/angles, short tails, zero work, repeated regions,
@@ -12,12 +12,30 @@ Accepted typed sources live in [`src/Cpu/Typed`](../src/Cpu/Typed), exercised by
 [`HelloWayland.CpuCarriers.fidproj`](../HelloWayland.CpuCarriers.fidproj) image demo.
 [`HelloWayland.fidproj`](../HelloWayland.fidproj) now selects the typed animated
 CPU host, which reuses Ariel carriers and owns Wayland dispatch and GBM maps on
-the submitting thread. Its actual animated-window acceptance remains pending.
+the submitting thread. A 20-second native window observation used 32
+participants selected from process affinity. GDB identified all 31 Ariel worker
+threads, and `/proc` CPU deltas confirmed work in each. Resize to 820×960 and
+normal close with all carrier joins passed. Screenshot pixels show an unchanged
+caption/panel and 33,971 changed orange glyph pixels between two equal-size
+frames. Native buffer captures independently confirm unchanged chrome across
+alternating buffers and an unchanged source splash raster.
+
+Acceptance was repeated after Clef integration merge `534429798`, with Composer
+built against the normal `clef` repository and no temporary compiler override.
+The fresh native application again passed 20 seconds of animation, all 31 worker
+CPU checks, resize and normal close/join. Its static caption/panel pixels were
+byte-identical while 19,495 orange glyph pixels changed. Evidence is retained in
+`/tmp/hello-wayland-window-main-reconciled`; the native build log is
+`/tmp/hello-wayland-main-reconciled-build.log`.
+
 The native GBM view gate passes eight map/write/unmap cycles, including real
 row padding, exact U32 readback, paired release and owner destruction; an
-out-of-bounds store triggers the generated guard. Headless acceptance alone does not establish
-mapped-display projection, compositor retirement or automatic compiler extraction
-of an arbitrary dispatch's complete access/capture graph.
+out-of-bounds store triggers the generated guard. The preservation gate confirms
+that native READ_WRITE acquisition retains untouched visible pixels across eight
+remaps, while source callbacks retain WriteOnly view capabilities. Driver-owned
+row padding need not persist. These gates validate the explicit integration;
+automatic compiler extraction of an arbitrary dispatch's complete access/capture
+graph remains separate work.
 
 The raw-pointer Ariel/Fill experiment is preserved under
 [`tests/ariel-prototype`](../tests/ariel-prototype/README.md), outside the production
