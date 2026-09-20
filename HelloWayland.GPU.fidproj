@@ -16,14 +16,14 @@ word_size = 64
 
 [dependencies]
 # Platform binding — required for platform context (must be named "platform")
-platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
+platform = { path = "../Fidelity.Platform/Profiles/Linux_x86_64_Default/Fidelity.Platform.fidproj" }
 
 # Desktop lifecycle — transitively pulls in Platform.Display, Wayland, DRM, GBM, Libc, resvg
 desktop = { path = "../Fidelity.Desktop/Fidelity.Desktop.Wayland.fidproj" }
 
 
 # HIP host bindings — device acquisition, module load, dispatch
-rocm = { path = "../Fidelity.Platform/GPU/AMD/RDNA3_5/Fidelity.ROCm.fidproj" }
+rocm = { path = "../Fidelity.Platform/Environments/Linux/x86_64/ROCm/Fidelity.ROCm.fidproj" }
 
 [build]
 sources = [

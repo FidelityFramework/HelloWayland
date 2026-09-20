@@ -13,8 +13,8 @@ arch = "x86_64"
 word_size = 64
 
 [dependencies]
-platform = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
-ariel = { path = "../../../Fidelity.Platform/CPU/Linux/x86_64/Experimental/Ariel/Fidelity.Ariel.Experimental.fidproj" }
+platform = { path = "../../../Fidelity.Platform/Profiles/Linux_x86_64_Default/Fidelity.Platform.fidproj" }
+ariel = { path = "../../../Fidelity.Platform/Environments/Linux/x86_64/Experimental/Ariel/Fidelity.Ariel.Experimental.fidproj" }
 
 [build]
 sources = [

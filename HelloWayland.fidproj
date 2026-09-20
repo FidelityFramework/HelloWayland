@@ -16,13 +16,13 @@ word_size = 64
 
 [dependencies]
 # Platform binding — required for platform context (must be named "platform")
-platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
-ariel = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Ariel.fidproj" }
+platform = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj" }
+ariel = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Ariel.fidproj" }
 dispatch = { path = "../BAREWire/src/BAREWire.DispatchCore.fidproj" }
-wayland = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Wayland.Native.fidproj" }
-display = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Display.Native.fidproj" }
-gbm = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.GBM.Native.fidproj" }
-resvg = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Image.Resvg.Native.fidproj" }
+wayland = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Wayland.Native.fidproj" }
+display = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Display.Native.fidproj" }
+gbm = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.GBM.Native.fidproj" }
+resvg = { path = "../Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Image.Resvg.Native.fidproj" }
 
 
 [build]
